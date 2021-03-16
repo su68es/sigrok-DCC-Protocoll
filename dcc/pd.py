@@ -1,8 +1,8 @@
 ##
 ## This file is part of the libsigrokdecode project.
 ##
-## Copyright (C) 2013-2020 Sven Bursch-Osewold
-##               2020      Roland Noell  
+## Copyright (C) 2013-2021 Sven Bursch-Osewold
+##               2021      Roland Noell  
 ##
 ## This program is free software; you can redistribute it and/or modify
 ## it under the terms of the GNU General Public License as published by
@@ -23,7 +23,7 @@
 Used norms:
 RCN-210 (01.12.2019)
 RCN-211 (02.12.2018) 
-RCN-212 (01.12.2019)
+RCN-212 (06.12.2020)
 RCN-213 (27.07.2015)
 RCN-214 (02.12.2018)
 RCN-216 (17.12.2017)
@@ -34,13 +34,14 @@ import sigrokdecode as srd
 
 class SamplerateError(Exception):
     pass
+    
+class ConfigParamError(Exception):
+    pass
 
 class Ann:
-    BITS, BITS_OTHER, FRAME, FRAME_OTHER, DATA, DATA_ACC, DATA_DEC, DATA_CV, COMMAND, ERROR, SEARCH_ACC, SEARCH_DEC, SEARCH_CV, SEARCH_BYTE = range(14)
+    BITS, BITS_OTHER, FRAME, FRAME_OTHER, DATA, DATA_ACC, DATA_DEC, DATA_CV, COMMAND, SEARCH_ACC, SEARCH_DEC, SEARCH_CV, SEARCH_BYTE, INFO, ERROR, VARIANCE1, VARIANCE2 = range(17)
 
 class Decoder(srd.Decoder):
-    maxInterferingPulseWidth = 4 #µs (ignoreInterferingPulse)
-
     api_version = 3
     id          = 'dcc'
     name        = 'DCC'
@@ -50,42 +51,101 @@ class Decoder(srd.Decoder):
     inputs      = ['logic']
     outputs     = []
     tags        = ['Encoding']
+
+
+    ## used settings for timing 
+    ## half1BitMin, half1BitMax, max1BitTolerance, half0BitMin, half0BitMax, half0BitMaxStreched
+    timing = [  [0,  0,  0,  0,  0,     0],      #invalid
+                [52, 64, 6,  90, 10000, 10000],  #NMRA decoding
+                [52, 64, 6,  90, 119,   10000],  #RCN decoding
+                [55, 61, 3,  95, 9900,  9900],   #NMRA compliance testing
+                [55, 61, 3,  95, 116,   9900],   #RCN compliance track
+                [56, 60, 3,  97, 114,   9898],   #RCN compliance station
+                [0,  0,  0,  0,  0,     0]    ]  #Experimental
+    BIT1MIN      =0
+    BIT1MAX          =1
+    BIT1TOLERANCE        =2
+    BIT0MIN                  =3
+    BIT0MAX                      =4
+    BIT0MAXSTRECHED                     =5
+
+    RAILCOMCUTOUTMIN     = 454 #The railcom cutout is 0 volt between a positive and negative voltage. Before the signal analyzer 
+    RAILCOMCUTOUTMAX     = 488 #the voltage is rectified and therefore one edge is lost. The timing should still work.
+    BIT0MAXSTRECHEDTOTAL = 12000
+    #BIT0MAXSTRECHEDTOTAL = 9000 #todo
+    minCountPreambleBits = 10
+
+    maxInterferingPulseWidth = 4 #µs (ignoreInterferingPulse)
+
+    timingINVALID        = 0
+    timingNMRAdecoder    = 1
+    timingRCNdecoder     = 2
+    timingNMRAcompliance = 3
+    timingRCNcomplianceT = 4
+    timingRCNcomplianceS = 5
+    timingExperimental   = 6
+    timingModeNo         = timingINVALID
+
+    B1min                  = 0
+    B1max                  = 0
+    B1tolerance            = 0
+    B0min                  = 0
+    B0max                  = 0
+    B0max_streched         = 0
+    ExpAccurancy           = -1
+
     channels    = (
         {'id': 'data', 'name': 'D0', 'desc': 'Data line'},
     )
     annotations = (
-        ('bits1',   'Bits'),
-        ('bits2',   'Other'),
-        ('frame1',  'Frame'),
-        ('frame2',  'Other'),
-        ('data1',   'Data'),
-        ('data2',   'Accessory address'),
-        ('data3',   'Decoder address'),
-        ('data4',   'CV'),
-        ('command', 'Command'),
-        ('error',   'Error'),
-        ('search1', 'Accessory address'),
-        ('search2', 'Decoder address'),
-        ('search3', 'CV'),
-        ('search4', 'Byte'),
+        ('bits1',     'Bits'),
+        ('bits2',     'Other'),
+        ('frame1',    'Frame'),
+        ('frame2',    'Other'),
+        ('data1',     'Data'),
+        ('data2',     'Accessory address'),
+        ('data3',     'Decoder address'),
+        ('data4',     'CV'),
+        ('command',   'Command'),
+        ('search1',   'Accessory address'),
+        ('search2',   'Decoder address'),
+        ('search3',   'CV'),
+        ('search4',   'Byte'),
+        ('info',      'Info'),
+        ('error',     'Error'),
+        ('variance1', 'Variance (compare)'),
+        ('variance2', 'Variance (compare)'),
     )
     annotation_rows = (
-        ('bits_',    'Bits',    (Ann.BITS, Ann.BITS_OTHER,)),
-        ('frame_',   'Frame',   (Ann.FRAME, Ann.FRAME_OTHER,)),
-        ('data_',    'Data',    (Ann.DATA_ACC, Ann.DATA_DEC, Ann.DATA_CV, Ann.DATA,)),
-        ('command_', 'Command', (Ann.COMMAND,)),
-        ('error_',   'Error',   (Ann.ERROR,)),
-        ('search_',  'Search',  (Ann.SEARCH_ACC, Ann.SEARCH_DEC, Ann.SEARCH_CV, Ann.SEARCH_BYTE,)),
+        ('bits_',     'Bits',       (Ann.BITS, Ann.BITS_OTHER,)),
+        ('frame_',    'Frame',      (Ann.FRAME, Ann.FRAME_OTHER,)),
+        ('data_',     'Data',       (Ann.DATA_ACC, Ann.DATA_DEC, Ann.DATA_CV, Ann.DATA,)),
+        ('command_',  'Command',    (Ann.COMMAND,)),
+        ('search_',   'Search',     (Ann.SEARCH_ACC, Ann.SEARCH_DEC, Ann.SEARCH_CV, Ann.SEARCH_BYTE,)),
+        ('info_',     'Info',       (Ann.INFO,)),
+        ('error_',    'Error',      (Ann.ERROR,)),
+        ('variance_', 'Variance',   (Ann.VARIANCE1, Ann.VARIANCE2,)),
     )
     options = (
-        {'id': 'CV_29_1',            'desc': 'CV29 Bit 1',              'default': '1: 28/128 speed mode', 'values': ('1: 28/128 speed mode', '0: 14 speed mode') },
-        {'id': 'Mode_112_127',       'desc': 'addr. 112-127',           'default': 'operation mode', 'values': ('operation mode', 'service mode') },
-        {'id': 'Addr_offset',        'desc': 'accessory addr. offset',  'default': 0 },
-        {'id': 'Search_acc_addr',    'desc': 'search acc. addr. [dec]', 'default': '' },
-        {'id': 'Search_dec_addr',    'desc': 'search dec. addr. [dec]', 'default': '' },
-        {'id': 'Search_cv',          'desc': 'search CV [dec]',         'default': '' },
-        {'id': 'Search_byte',        'desc': 'search byte [dec/0b/0x]', 'default': '' },
-        {'id': 'Ignore_short_pulse', 'desc': 'ignore pulse <= '+str(maxInterferingPulseWidth)+' µs', 'default': 'no', 'values': ('no', 'yes') },
+        {'id': 'CV_29_1',                 'desc': 'CV29 Bit 1',                                   'default': '1: 28/128 speed mode', 'values': ('1: 28/128 speed mode', '0: 14 speed mode') },
+        {'id': 'Mode_112_127',            'desc': 'address 112-127',                              'default': 'operation mode', 'values': ('operation mode', 'service mode') },
+        {'id': 'Addr_offset',             'desc': 'accessory address offset',                     'default': 0 },
+        {'id': 'Search_acc_addr',         'desc': 'search accessory address [decimal]',           'default': '' },
+        {'id': 'Search_dec_addr',         'desc': 'search decoder address [decimal]',             'default': '' },
+        {'id': 'Search_cv',               'desc': 'search CV [decimal]',                          'default': '' },
+        {'id': 'Search_byte',             'desc': 'search byte [dec/0b/0x] (e.g. 3, 0xFF)',       'default': '' },
+        {'id': 'Timing_mode',             'desc': 'timing mode',                                  'default': 'NMRA decoding', 'values': ('NMRA decoding', 'RCN decoding', 'NMRA compliance testing', 'RCN compliance testing track', 'RCN compliance testing station', 'Experimental') },
+        {'id': 'RCN_allow_streched_zero', 'desc': 'RCN/Exp mode: allow streched 0-bits',          'default': 'no', 'values': ('no', 'yes') },
+        {'id': 'Preamble_bits_count',     'desc': 'compliance mode: min. preamble bits',          'default': 17 },
+        {'id': 'Ignore_short_pulse',      'desc': 'ignore pulse <= '+str(maxInterferingPulseWidth)+' µs', 'default': 'no', 'values': ('no', 'yes') },
+        {'id': 'B1min',                   'desc': 'Experimental:1-bit half min. [µs]',            'default': 52, },
+        {'id': 'B1max',                   'desc': 'Experimental:1-bit half max. [µs]',            'default': 64, },
+        {'id': 'B1tolerance',             'desc': 'Experimental:1-bit half tolerance [µs]',       'default': 6, },
+        {'id': 'B0min',                   'desc': 'Experimental:0-bit half min. [µs]',            'default': 90, },
+        {'id': 'B0max',                   'desc': 'Experimental:0-bit half max. [µs] (RCN+Exp.)', 'default': 119, },
+        {'id': 'B0max_streched',          'desc': 'Experimental:0-bit half streched [µs]',        'default': 10000, },
+        {'id': 'Timing_compare',          'desc': 'Experimental:compare timing: mode/exp.',       'default': 'off', 'values': ('off', 'on') },
+        #{'id': 'ExpAccurancy',            'desc': 'Exp:Accuracy variance [µs] (<0=auto)',         'default': -1, },
     )
 
     weekday = ['Monday',    #0
@@ -118,7 +178,7 @@ class Decoder(srd.Decoder):
              'Nov. ', #11
              'Dec. '  #12
             ]
-    
+            
     def putx(self, start, end, data):
         self.put(start, end, self.out_ann, data)
         
@@ -142,18 +202,21 @@ class Decoder(srd.Decoder):
         self.dccBitPos              = []
         self.dccValue               = 0
         self.decodedBytes           = []
-        self.dccStatus              = 'WAITINGFORPREAMBLE'
+        self.dccStatus              = 'SYNCRONIZESIGNAL'
+        self.half1Counter           = 0
         self.syncSignal             = True
-        self.cond1                  = 'r'  #raising-edge
-        self.cond2                  = 'f'  #falling-edge
-        self.dec_addr_search        = -2
-        self.acc_addr_search        = -2
-        self.cv_addr_search         = -2
-        self.byte_search            = -2
+        self.lastPacketWasStop      = False
+        self.railcomCutoutPossible  = False
+        self.broken1bitPossible     = False
         self.speed14                = False
         self.serviceMode            = False
         self.addrOffset             = 0
         self.ignoreInterferingPulse = 'no'
+        self.timingCompare          = 'off'
+        self.timingMode             = 'NMRA decoding'
+        self.timingModeNo           = self.timingINVALID
+        self.rcnAllowStrechedZero   = 'no'
+        self.accuracy               = 0
 
     def start(self):
         #This function is called before the beginning of the decoding. This is the place to register() the output types, check the user-supplied PD options for validity, and so on.
@@ -162,34 +225,66 @@ class Decoder(srd.Decoder):
         ##############
         #read and verify options
         self.AddrOffset             = self.options['Addr_offset']
+        self.timingMode             = self.options['Timing_mode']
+        self.rcnAllowStrechedZero   = self.options['RCN_allow_streched_zero']
+        self.preambleBitsCount      = self.options['Preamble_bits_count']
         self.ignoreInterferingPulse = self.options['Ignore_short_pulse']
+        self.timingCompare          = self.options['Timing_compare']
+        
+        if self.timingMode == 'NMRA decoding':
+            self.timingModeNo         = self.timingNMRAdecoder
+            self.minCountPreambleBits = 10
+        elif self.timingMode == 'RCN decoding':
+            self.timingModeNo         = self.timingRCNdecoder
+            self.minCountPreambleBits = 10
+        elif self.timingMode == 'NMRA compliance testing':
+            if self.samplerate < 2000000:
+                self.timingModeNo = self.timingINVALID
+            else:
+                self.timingModeNo = self.timingNMRAcompliance
+            self.minCountPreambleBits = self.preambleBitsCount
+        elif self.timingMode == 'RCN compliance testing track':
+            if self.samplerate < 2000000:
+                self.timingModeNo = self.timingINVALID
+            else:
+                self.timingModeNo = self.timingRCNcomplianceT
+            self.minCountPreambleBits = self.preambleBitsCount
+        elif self.timingMode == 'RCN compliance testing station':
+            if self.samplerate < 2000000:
+                self.timingModeNo = self.timingINVALID
+            else:
+                self.timingModeNo = self.timingRCNcomplianceS
+            self.minCountPreambleBits = self.preambleBitsCount
+        elif self.timingMode == 'Experimental':
+            self.timingModeNo = self.timingExperimental
+            self.minCountPreambleBits = 10
 
         if self.options['CV_29_1']      == '0: 14 speed mode':
-            self.speed14     = True;
+            self.speed14     = True
 
         if self.options['Mode_112_127'] == 'service mode':
-            self.serviceMode = True;
+            self.serviceMode = True
         
         try:
             self.acc_addr_search = int(self.options['Search_acc_addr'])
         except:
-            self.acc_addr_search = -2
-        if self.acc_addr_search < 1 or self.acc_addr_search > 2047:
-            self.acc_addr_search = -2
+            self.acc_addr_search = -255
+        if self.acc_addr_search < 1 or self.acc_addr_search > 2048:
+            self.acc_addr_search = -255
         
         try:
             self.dec_addr_search = int(self.options['Search_dec_addr'])
         except:
-            self.dec_addr_search = -2
+            self.dec_addr_search = -255
         if self.dec_addr_search < 0 or self.dec_addr_search > 10239:
-            self.dec_addr_search = -2
+            self.dec_addr_search = -255
         
         try:
             self.cv_addr_search  = int(self.options['Search_cv'])
         except:
-            self.cv_addr_search  = -2
+            self.cv_addr_search  = -255
         if self.cv_addr_search < 1 or self.cv_addr_search > 16777216:
-            self.cv_addr_search = -2
+            self.cv_addr_search = -255
 
         try:
             self.byte_search = int(self.options['Search_byte'], base=10)
@@ -200,20 +295,56 @@ class Decoder(srd.Decoder):
                 try:
                     self.byte_search = int(self.options['Search_byte'], base=16)
                 except:
-                    self.byte_search = -2
+                    self.byte_search = -255
         if self.byte_search < 0 or self.byte_search > 255:
-            self.byte_search = -2
+            self.byte_search = -255
         
+        try:
+            self.B1min  = int(self.options['B1min'])
+        except:
+            self.B1min  = -255
+        try:
+            self.B1max  = int(self.options['B1max'])
+        except:
+            self.B1max  = -255
+        try:
+            self.B1tolerance  = int(self.options['B1tolerance'])
+        except:
+            self.B1tolerance  = -255
+        try:
+            self.B0min  = int(self.options['B0min'])
+        except:
+            self.B0min  = -255
+        try:
+            self.B0max  = int(self.options['B0max'])
+        except:
+            self.B0max  = -255
+        try:
+            self.B0max_streched  = int(self.options['B0max_streched'])
+        except:
+            self.B0max_streched  = -255
+        try:
+            self.ExpAccurancy  = int(self.options['ExpAccurancy'])
+        except:
+            self.ExpAccurancy  = -255
+            
+        self.timing[self.timingExperimental][self.BIT1MIN]         = self.B1min
+        self.timing[self.timingExperimental][self.BIT1MAX]         = self.B1max
+        self.timing[self.timingExperimental][self.BIT1TOLERANCE]   = self.B1tolerance
+        self.timing[self.timingExperimental][self.BIT0MIN]         = self.B0min
+        self.timing[self.timingExperimental][self.BIT0MAX]         = self.B0max
+        self.timing[self.timingExperimental][self.BIT0MAXSTRECHED] = self.B0max_streched
+
     def metadata(self, key, value):
         if key == srd.SRD_CONF_SAMPLERATE:
-            self.samplerate = value;
+            self.samplerate = value
 
     def incPos(self, pos, packetByte):
         #Support function: Returns next position of packet if position exists
         if pos+1 < len(packetByte):
             return pos+1, False
         else:
-            self.put_packetbyte(packetByte, pos, [Ann.ERROR, ['Byte missing at next position: ' + str(pos+2)]])
+            self.put_packetbyte(packetByte, pos, [Ann.ERROR, ['Byte missing at next position: ' + str(pos+2), 'Error', 'E']])
             return pos, True  #avoid access violation
             
     def handleDecodedBytes(self, packetByte):
@@ -223,7 +354,7 @@ class Decoder(srd.Decoder):
         cv_addr          = -1  #found CV
 
         if len(packetByte) < 3:
-            self.put_packetbytes(packetByte, 0, len(packetByte)-1, [Ann.ERROR, ['Paket too short: ' + str(len(packetByte)) + ' Byte only']])
+            self.put_packetbytes(packetByte, 0, len(packetByte)-1, [Ann.ERROR, ['Paket too short: ' + str(len(packetByte)) + ' Byte only', 'Error', 'E']])
             return
 
         pos      = 0  #position within packet
@@ -291,7 +422,7 @@ class Decoder(srd.Decoder):
                         self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['CV']])
                         pos, error = self.incPos(pos, packetByte)
                         if error == True: return
-                        if ((packetByte[pos][0] & 0b00010000) == 0b00010000):
+                        if (packetByte[pos][0] & 0b00010000) == 0b00010000:
                             output_long = 'Write, '
                             output_short = 'w,'
                         else:
@@ -299,7 +430,7 @@ class Decoder(srd.Decoder):
                             output_short = 'v,'
                         output_long  += str(packetByte[pos][0] & 0b00000111)
                         output_short += str(packetByte[pos][0] & 0b00000111)
-                        if ((packetByte[pos][0] & 0b00001000) == 0b00001000):
+                        if (packetByte[pos][0] & 0b00001000) == 0b00001000:
                             output_long  += ', 1'
                             output_short += ',1'
                         else:
@@ -566,7 +697,7 @@ class Decoder(srd.Decoder):
                     for i in range(0, 4):
                         output_long  = output_long  + 'F' + str(f) + ':' + str(value & 1)
                         output_short = output_short + str(value & 1)
-                        if (i<3):
+                        if i<3:
                             output_long  = output_long  + ', '
                             output_short = output_short + ','
                         value = value >> 1
@@ -593,7 +724,7 @@ class Decoder(srd.Decoder):
                     for i in range(0, 4):
                         output_long  = output_long  + 'F' + str(f) + ':' + str(value & 1)
                         output_short = output_short + str(value & 1)
-                        if (i<3):
+                        if i<3:
                             output_long  = output_long  + ', '
                             output_short = output_short + ','
                         value = value >> 1
@@ -627,7 +758,7 @@ class Decoder(srd.Decoder):
                         for i in range(0, 8):
                             output_long  = output_long  + 'F' + str(f + i) + ':' + str(value & 1)
                             output_short = output_short + str(value & 1)
-                            if (i<7):
+                            if i<7:
                                 output_long  = output_long  + ', '
                                 output_short = output_short + ','
                             value = value >> 1
@@ -692,14 +823,14 @@ class Decoder(srd.Decoder):
                             self.put_packetbytes(packetByte, pos-1, pos, [Ann.DATA,    [output_1]])
                             self.put_packetbytes(packetByte, pos-1, pos, [Ann.COMMAND, ['Broadcast F29-F32767']])
                         elif packetByte[pos-1][0] & 0b01111111 == 0:
-                            self.put_packetbytes(packetByte, pos-1, pos, [Ann.ERROR,   ['Use binarystate short']])
+                            self.put_packetbytes(packetByte, pos-1, pos, [Ann.ERROR,   ['Use binarystate short', 'Error', 'E']])
                         else:
                             self.put_packetbytes(packetByte, pos-1, pos, [Ann.DATA,    ['F' + str(address) + ':' + output_1]])
                             
                     elif subcmd == 0b00001:
                         ##[RCN-212 2.3.9]
                         if dec_addr != 0:
-                            self.put_packetbytes(packetByte, 0, len(packetByte)-2, [Ann.ERROR, ['Only Broadcast allowed']])
+                            self.put_packetbytes(packetByte, 0, len(packetByte)-2, [Ann.ERROR, ['Only Broadcast allowed', 'Error', 'E']])
                         value = packetByte[pos][0]
                         if (value >> 6) & 0b11 == 0b00:
                             self.put_packetbyte(packetByte, pos-1, [Ann.DATA,  ['Model-Time']])
@@ -734,24 +865,31 @@ class Decoder(srd.Decoder):
                     elif subcmd == 0b00010:
                         ##[RCN-212 2.3.10]
                         if dec_addr != 0:
-                            self.put_packetbytes(packetByte, 0, len(packetByte)-2, [Ann.ERROR, ['Only Broadcast allowed']])
-                        self.put_packetbyte(packetByte, pos-1,       [Ann.DATA,    ['Systemtime']])
+                            self.put_packetbytes(packetByte, 0, len(packetByte)-2, [Ann.ERROR, ['Only Broadcast allowed', 'Error', 'E']])
+                        if len(packetByte) == 5 or len(packetByte) == 6:
+                            self.put_packetbyte(packetByte, pos-1,   [Ann.DATA,    ['Systemtime']])
+                        if len(packetByte) == 7 or len(packetByte) == 8:
+                            self.put_packetbyte(packetByte, pos-1,   [Ann.DATA,    ['Systemtime (deprecated)']])
                         self.put_packetbyte(packetByte, pos,         [Ann.COMMAND, ['MMMMMMMM']])
                         value = packetByte[pos][0]
                         pos, error = self.incPos(pos, packetByte)
                         if error == True: return
                         self.put_packetbyte(packetByte, pos,         [Ann.COMMAND, ['MMMMMMMM']])
                         value = value * 256 + packetByte[pos][0]
-                        pos, error = self.incPos(pos, packetByte)
-                        if error == True: return
-                        self.put_packetbyte(packetByte, pos,         [Ann.COMMAND, ['MMMMMMMM']])
-                        value = value * 256 + packetByte[pos][0]
-                        pos, error = self.incPos(pos, packetByte)
-                        if error == True: return
-                        self.put_packetbyte(packetByte, pos,         [Ann.COMMAND, ['MMMMMMMM']])
-                        value = value * 256 + packetByte[pos][0]
-                        self.put_packetbytes(packetByte, pos-3, pos, [Ann.DATA, [str(value) + ' ms since systemstart (' + '{:.0f}'.format(value/60000) + ' minutes = ' + '{:.1f}'.format(value/3600000) + ' hours)',\
-                                                                                 str(value) + ' ms since systemstart', str(value)]])
+                        if len(packetByte) == 5 or len(packetByte) == 6:
+                            self.put_packetbytes(packetByte, pos-3, pos, [Ann.DATA, [str(value) + ' ms since systemstart (' + '{:.0f}'.format(value/1000) + ' seconds)',\
+                                                                                     str(value) + ' ms since systemstart', str(value)]])
+                        if len(packetByte) == 7 or len(packetByte) == 8:
+                            pos, error = self.incPos(pos, packetByte)
+                            if error == True: return
+                            self.put_packetbyte(packetByte, pos,         [Ann.COMMAND, ['MMMMMMMM']])
+                            value = value * 256 + packetByte[pos][0]
+                            pos, error = self.incPos(pos, packetByte)
+                            if error == True: return
+                            self.put_packetbyte(packetByte, pos,         [Ann.COMMAND, ['MMMMMMMM']])
+                            value = value * 256 + packetByte[pos][0]
+                            self.put_packetbytes(packetByte, pos-3, pos, [Ann.DATA, [str(value) + ' ms since systemstart (' + '{:.0f}'.format(value/60000) + ' minutes = ' + '{:.1f}'.format(value/3600000) + ' hours)',\
+                                                                                     str(value) + ' ms since systemstart', str(value)]])
                     else:
                         self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Reserved']])
                 
@@ -944,7 +1082,7 @@ class Decoder(srd.Decoder):
                 acc_addr = decaddr + self.AddrOffset
                 
                 if decaddr < 1:
-                    self.put_packetbytes(packetByte, pos-1, pos, [Ann.ERROR, ['Address < 1 not allowed']])
+                    self.put_packetbytes(packetByte, pos-1, pos, [Ann.ERROR, ['Address < 1 not allowed', 'Error', 'E']])
                 
                 pom = False
                 if packetByte[pos][0] & 0b10001000 == 0b00001000:
@@ -969,7 +1107,7 @@ class Decoder(srd.Decoder):
                                 self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND,  ['Broadcast']])
                                 self.put_packetbyte(packetByte, pos,   [Ann.DATA,     ['ESTOP']])
                             else:
-                                self.put_packetbyte(packetByte, pos,   [Ann.ERROR,    ['Unknown (maybe NMRA-Broadcast)', 'Unknown']])
+                                self.put_packetbyte(packetByte, pos,   [Ann.INFO,    ['Unknown (maybe NMRA-Broadcast)', 'Unknown']])
                         else:
                             if len(packetByte) == 3:
                                 output_1 = str(packetByte[pos][0] & 1)
@@ -989,9 +1127,9 @@ class Decoder(srd.Decoder):
                                                                                                  str(acc_addr) + ' (' + str(decoder) + ',' + str(port) + ')', str(acc_addr)]])
                                     self.put_packetbyte(packetByte, pos,         [Ann.COMMAND,  ['Decoder reset', 'Reset']])
                                 else:
-                                    self.put_packetbytes(packetByte, pos-1, pos, [Ann.ERROR, ['Unknown']])
+                                    self.put_packetbytes(packetByte, pos-1, pos, [Ann.INFO, ['Unknown']])
                             else:        
-                                self.put_packetbyte(packetByte, pos, [Ann.ERROR, ['Unknown']])
+                                self.put_packetbyte(packetByte, pos, [Ann.INFO, ['Unknown']])
                     
                     elif len(packetByte) == 6:
                         pos, error = self.incPos(pos, packetByte)
@@ -1004,7 +1142,7 @@ class Decoder(srd.Decoder):
                                                                                              str(acc_addr) + ' (' + str(decoder) + ',' + str(port) + ')', str(acc_addr)]])
                             self.put_packetbyte(packetByte, pos-1,           [Ann.COMMAND,  ['Address', 'Addr.']])
                         else:
-                            self.put_packetbytes(packetByte, pos-2, pos,     [Ann.ERROR, ['Unknown']])
+                            self.put_packetbytes(packetByte, pos-2, pos,     [Ann.INFO, ['Unknown']])
                 
                 else:
                     ##[RCN-213 2.3]
@@ -1021,7 +1159,7 @@ class Decoder(srd.Decoder):
                             else:                                            
                                 self.put_packetbyte(packetByte, pos-1,       [Ann.DATA,  [hex(packetByte[pos-1][0]) + '/' + str(packetByte[pos-1][0])]])
                                 self.put_packetbyte(packetByte, pos,         [Ann.DATA,  [hex(packetByte[pos][0]) + '/' + str(packetByte[pos][0])]])
-                                self.put_packetbytes(packetByte, pos-1, pos, [Ann.ERROR, ['Unknown']])
+                                self.put_packetbytes(packetByte, pos-1, pos, [Ann.INFO, ['Unknown']])
                         else:                                                
                             self.put_packetbytes(packetByte, pos-2, pos-1,   [Ann.DATA_ACC, [str(acc_addr) + ' (decoder:' + str(decoder) + ', port:' + str(port) + ')',\
                                                                                              str(acc_addr) + ' (' + str(decoder) + ',' + str(port) + ')', str(acc_addr)]])
@@ -1045,7 +1183,7 @@ class Decoder(srd.Decoder):
                                                                                              str(acc_addr) + ' (' + str(decoder) + ',' + str(port) + ')', str(acc_addr)]])
                             self.put_packetbyte(packetByte, pos-1,           [Ann.COMMAND,  ['Address', 'Addr.']])
                         else:
-                            self.put_packetbytes(packetByte, pos-2, pos,     [Ann.ERROR, ['Unknown']])
+                            self.put_packetbytes(packetByte, pos-2, pos,     [Ann.INFO, ['Unknown']])
                 
                 if pom == True:
                     subcmd = (packetByte[pos][0] & 0b00011111)
@@ -1125,11 +1263,11 @@ class Decoder(srd.Decoder):
             if validPacketFound == False:
                 self.put_packetbyte(packetByte, x,     [Ann.COMMAND, [output_1]])
                 if self.serviceMode == False and 112 <= idPacket <= 127:
-                    self.put_packetbyte(packetByte, x, [Ann.ERROR, ['Unknown (maybe service mode packet)', 'Unknown']])
+                    self.put_packetbyte(packetByte, x, [Ann.INFO, ['Unknown (maybe service mode packet)', 'Unknown']])
                 elif self.serviceMode == True:
-                    self.put_packetbyte(packetByte, x, [Ann.ERROR, ['Unknown (maybe operation mode packet)', 'Unknown']])
+                    self.put_packetbyte(packetByte, x, [Ann.INFO, ['Unknown (maybe operation mode packet)', 'Unknown']])
                 else:
-                    self.put_packetbyte(packetByte, x, [Ann.ERROR, ['Unknown']])
+                    self.put_packetbyte(packetByte, x, [Ann.INFO, ['Unknown']])
 
 
         ##################
@@ -1144,10 +1282,10 @@ class Decoder(srd.Decoder):
                 self.put_packetbyte(packetByte, len(packetByte)-1,     [Ann.FRAME, ['Checksum: ' + output_1, output_1]])
             else:
                 output_1 = str(checksum) + '<>' + str(packetByte[len(packetByte)-1][0])
-                self.put_packetbytes(packetByte, 0, len(packetByte)-1, [Ann.ERROR, ['Checksum']])
+                self.put_packetbytes(packetByte, 0, len(packetByte)-1, [Ann.ERROR, ['Checksum', 'Error', 'E']])
                 self.put_packetbyte(packetByte, len(packetByte)-1,     [Ann.FRAME_OTHER, ['Checksum: ' + output_1, output_1]])
         else:
-            self.put_packetbytes(packetByte, 0, len(packetByte)-1,     [Ann.ERROR, ['Checksum missing']])
+            self.put_packetbytes(packetByte, 0, len(packetByte)-1,     [Ann.ERROR, ['Checksum missing', 'Error', 'E']])
 
         
         ##################
@@ -1187,19 +1325,31 @@ class Decoder(srd.Decoder):
         self.dccStatus     = newstatus
         self.dccBitCounter = 0
         self.decodedBytes  = []
+        self.half1Counter  = 0
+        if newstatus == 'SYNCRONIZESIGNAL':
+            self.syncSignal             = True
+            self.railcomCutoutPossible  = False
+            self.broken1bitPossible     = False
+            self.lastPacketWasStop      = False
+        
 
-    def collectDataBytes(self, start, stop, data):
+    def processFoundByte(self, start, stop, data):
         ##[RCN-211 2]
-
-        #Test for invalid bits
-        if data not in ['0', '1']:               #invalid timing
-            self.setNextStatus('WAITINGFORPREAMBLE')
+        #Check first bit after synchronization
+        if self.dccStatus == 'PREAMBLEFOUND':
+            if data == '0':                      #start packet found
+                self.putx(start, stop,                     [Ann.FRAME, ['Start Packet', 'Start', 'S']]) #Packet Start Bit
+                self.setNextStatus('ADDRESSDATABYTE')
+            else:
+                self.put_signal(                           [Ann.FRAME_OTHER, ['Resynchronize (Wait for preamble)', 'Resynchronize', 'Resync.', 'R']])
+                self.put_signal(                           [Ann.ERROR,       ['unexpected 1-bit found', 'Error', 'E']])
+                self.setNextStatus('SYNCRONIZESIGNAL')
 
         #Wait for the first 1
         elif self.dccStatus == 'WAITINGFORPREAMBLE':
             if data == '1':                      #preamble start
-                self.dccStart      = start
                 self.setNextStatus('PREAMBLE')
+                self.dccStart      = start
 
         #Collect the preamble bits
         elif self.dccStatus == 'PREAMBLE':
@@ -1207,35 +1357,42 @@ class Decoder(srd.Decoder):
                 self.dccBitCounter += 1
                 self.dccLast       = stop
             else:                                #preamble end
-                if self.dccBitCounter+1+1 >= 10: #valid preamble (minimum 10 bit wherby last stop bit can usually be counted among them)
-                    output_long  = 'Preamble: ' + str(self.dccBitCounter+1) + ' bits'
-                    output_short = 'Preamble'
-                    output_3     = 'P'
-                    self.putx(start, stop,                 [Ann.FRAME, ['Start Packet', 'Start', 'S']]) #Packet Start Bit
-                    if self.syncSignal == True:
-                        self.syncSignal = False
-                        output_long  += ' (sync in progress)'
-                        output_short += ' (sync)'
-                        output_3     += ' (s)'
-                    self.putx(self.dccStart, self.dccLast, [Ann.FRAME, [output_long, output_short, output_3]])
+                if     (self.lastPacketWasStop == True
+                    and self.timingModeNo != self.timingRCNcomplianceT
+                    and self.timingModeNo != self.timingRCNcomplianceS
+                    and self.timingModeNo != self.timingNMRAcompliance):
+                    self.dccBitCounter += 1
+                if self.dccBitCounter+1 >= self.minCountPreambleBits: #valid preamble (minimum 10 bit wherby last stop bit can usually be counted among them)
+                    self.putx(start, stop,                     [Ann.FRAME,       ['Start Packet', 'Start', 'S']]) #Packet Start Bit
+                    if     (self.lastPacketWasStop == True
+                        and self.timingModeNo != self.timingRCNcomplianceT
+                        and self.timingModeNo != self.timingRCNcomplianceS
+                        and self.timingModeNo != self.timingNMRAcompliance):
+                        self.putx(self.dccStart, self.dccLast, [Ann.FRAME,       ['Preamble: 1+' + str(self.dccBitCounter) + ' bits', 'Preamble', 'P']])
+                    else:
+                        self.putx(self.dccStart, self.dccLast, [Ann.FRAME,       ['Preamble: ' + str(self.dccBitCounter+1) + ' bits', 'Preamble', 'P']])
                     self.setNextStatus('ADDRESSDATABYTE')
                 else:                            #invalid preamble
-                    self.setNextStatus('WAITINGFORPREAMBLE')
-                    if self.syncSignal == False:
-                        self.putx(self.dccStart, self.dccLast, [Ann.ERROR, ['Invalid preamble']])
-                    self.syncSignal = True       #resynchronize
-                    self.put_signal(                       [Ann.FRAME_OTHER, ['Resynchronize (Wait for preamble)', 'Resynchronize','Resync.','R']])
+                    self.put_signal(                           [Ann.FRAME_OTHER, ['Resynchronize (Wait for preamble)', 'Resynchronize', 'Resync.', 'R']])
+                    if     (self.lastPacketWasStop == True
+                        and self.timingModeNo != self.timingRCNcomplianceT
+                        and self.timingModeNo != self.timingRCNcomplianceS
+                        and self.timingModeNo != self.timingNMRAcompliance):
+                        self.putx(self.dccStart, self.dccLast, [Ann.ERROR,       ['Invalid preamble (too few 1-bits (1+' + str(self.dccBitCounter) + '/min' + str(self.minCountPreambleBits) + '))', 'Error', 'E']])
+                    else:
+                        self.putx(self.dccStart, self.dccLast, [Ann.ERROR,       ['Invalid preamble (too few 1-bits (' + str(self.dccBitCounter+1) + '/min' + str(self.minCountPreambleBits) + '))', 'Error', 'E']])
+                    self.setNextStatus('SYNCRONIZESIGNAL')
 
         #Collection 8 databits and one bit indicating the end of data
         elif self.dccStatus == 'ADDRESSDATABYTE':
+            self.lastPacketWasStop = False
             if self.dccBitCounter == 0:          #first bit of new byte
                 self.dccValue  = 0
-                self.dccStart  = start
                 self.dccBitPos = []
             if self.dccBitCounter < 8:           #build byte 
                 self.dccBitPos.append(start)
                 self.dccBitCounter += 1
-                self.dccValue      = ((self.dccValue) << 1) + int(data);
+                self.dccValue      = ((self.dccValue) << 1) + int(data)
                 if self.dccBitCounter == 8:      #byte complete
                     self.dccBitPos.append(stop)
                     self.decodedBytes.append([self.dccValue, self.dccBitPos])
@@ -1243,49 +1400,213 @@ class Decoder(srd.Decoder):
                 if data == '0':                  #separator to next byte
                     self.dccBitCounter = 0
                     self.dccValue      = 0
-                    self.putx(start, stop,                 [Ann.FRAME, ['Start Databyte', 'Start', 'S']])
+                    self.putx(start, stop,                     [Ann.FRAME, ['Start Databyte', 'Start', 'S']])
                 else:                            #end identifier
-                    self.putx(start, stop,                 [Ann.FRAME, ['Stop Packet', 'Stop', 'S']])
+                    self.putx(start, stop,                     [Ann.FRAME, ['Stop Packet', 'Stop', 'S']])
                     self.handleDecodedBytes(self.decodedBytes)
+                    self.railcomCutoutPossible = True
+                    self.lastPacketWasStop     = True
                     self.setNextStatus('WAITINGFORPREAMBLE')
+
+
+    def isHalf1Bit(self, sample):
+        ##[RCN-210 5 / S-9.1]
+        TM    = self.timingModeNo
+        TE    = self.timingExperimental
+        minTM = minTE = self.timing[TM][self.BIT1MIN]-self.accuracy <= sample
+        maxTM = maxTE = sample <= self.timing[TM][self.BIT1MAX]+self.accuracy
+        if self.timingCompare == 'on':
+            minTE = self.timing[TE][self.BIT1MIN]-self.accuracy <= sample
+            maxTE = sample <= self.timing[TE][self.BIT1MAX]+self.accuracy
+        if (minTM or minTE) and (maxTM or maxTE):
+            if minTM == False and minTE == True:
+                v1 = '{:.2f}'.format(sample) + 'µs'
+                v2 = '{:.2f}'.format(self.timing[TM][self.BIT1MIN]) + 'µs'
+                self.putx(self.edge_1, self.edge_2, [Ann.VARIANCE1, ['half 1 bit to short: actual: ' + v1 + ', minimum: ' + v2, v1 + '/' + v2]])
+            elif maxTM == False and maxTE == True:
+                v1 = '{:.2f}'.format(sample) + 'µs'
+                v2 = '{:.2f}'.format(self.timing[TM][self.BIT1MAX]) + 'µs'
+                self.putx(self.edge_1, self.edge_2, [Ann.VARIANCE1, ['half 1 bit to long: actual: ' + v1 + ', maximum: ' + v2, v1 + '/' + v2]])
+            return True
+        return False
+        
+    def is1Bit(self, part1, part2):
+        ##[RCN-210 5 / S-9.1]
+        TM     = self.timingModeNo
+        TE     = self.timingExperimental
+        minTM1 = minTE1 = self.timing[TM][self.BIT1MIN]-self.accuracy <= part1
+        maxTM1 = maxTE1 = part1 <= self.timing[TM][self.BIT1MAX]+self.accuracy
+        minTM2 = minTE2 = self.timing[TM][self.BIT1MIN]-self.accuracy <= part2
+        maxTM2 = maxTE2 = part2 <= self.timing[TM][self.BIT1MAX]+self.accuracy
+        diffTM = diffTE = abs(part1-part2) <= max(self.timing[TM][self.BIT1TOLERANCE], 2*self.accuracy)
+        if self.timingCompare == 'on':
+            minTE1 = self.timing[TE][self.BIT1MIN]-self.accuracy <= part1
+            maxTE1 = part1 <= self.timing[TE][self.BIT1MAX]+self.accuracy
+            minTE2 = self.timing[TE][self.BIT1MIN]-self.accuracy <= part2
+            maxTE2 = part2 <= self.timing[TE][self.BIT1MAX]+self.accuracy
+            diffTE = abs(part1-part2) <= max(self.timing[TE][self.BIT1TOLERANCE], 2*self.accuracy)
+        if (    ((minTM1 or minTE1) and (maxTM1 or maxTE1))  #'1' part1
+            and ((minTM2 or minTE2) and (maxTM2 or maxTE2))  #'1' part2                 
+            and (diffTM or diffTE)                           #difference part1/part2
+           ):
+            if diffTM == False and diffTE == True:
+                v1 = '{:.2f}'.format(abs(part1-part2)) + 'µs'
+                v2 = '{:.2f}'.format(self.timing[TM][self.BIT1TOLERANCE]) + 'µs'
+                self.put_signal([Ann.VARIANCE2, ['half bits difference: actual: ' + v1 + ', allowed: ' + v2, v1 + '/' + v2]])
+            if minTM1 == False and minTE1 == True:
+                v1 = '{:.2f}'.format(part1) + 'µs'
+                v2 = '{:.2f}'.format(self.timing[TM][self.BIT1MIN]) + 'µs'
+                self.putx(self.edge_1, self.edge_2, [Ann.VARIANCE1, ['1. half bit to short: actual: ' + v1 + ', minimum: ' + v2, v1 + '/' + v2]])
+            elif maxTM1 == False and maxTE1 == True:
+                v1 = '{:.2f}'.format(part1) + 'µs'
+                v2 = '{:.2f}'.format(self.timing[TM][self.BIT1MAX]) + 'µs'
+                self.putx(self.edge_1, self.edge_2, [Ann.VARIANCE1, ['1. half bit to long: actual: ' + v1 + ', maximum: ' + v2, v1 + '/' + v2]])
+            if minTM2 == False and minTE2 == True:
+                v1 = '{:.2f}'.format(part2) + 'µs'
+                v2 = '{:.2f}'.format(self.timing[TM][self.BIT1MIN]) + 'µs'
+                self.putx(self.edge_2, self.edge_3, [Ann.VARIANCE1, ['2. half bit to short: actual: ' + v1 + ', minimum: ' + v2, v1 + '/' + v2]])
+            elif maxTM2 == False and maxTE2 == True:
+                v1 = '{:.2f}'.format(part2) + 'µs'
+                v2 = '{:.2f}'.format(self.timing[TM][self.BIT1MAX]) + 'µs'
+                self.putx(self.edge_2, self.edge_3, [Ann.VARIANCE1, ['2. half bit to long: actual: ' + v1 + ', maximum: ' + v2, v1 + '/' + v2]])
+            return True
+        return False
+
+    def is0Bit(self, part1, part2):
+        ##[RCN-210 5 / S-9.1]
+        TM       = self.timingModeNo
+        TE       = self.timingExperimental
+        total    = part1+part2
+        minTM1   = minTE1   = self.timing[TM][self.BIT0MIN]-self.accuracy <= part1
+        maxTM1   = maxTE1   = part1 <= self.timing[TM][self.BIT0MAX]+self.accuracy
+        maxStTM1 = maxStTE1 = part1 <= self.timing[TM][self.BIT0MAXSTRECHED]+self.accuracy
+        minTM2   = minTE2   = self.timing[TM][self.BIT0MIN]-self.accuracy <= part2
+        maxTM2   = maxTE2   = part2 <= self.timing[TM][self.BIT0MAX]+self.accuracy
+        maxStTM2 = maxStTE2 = part2 <= self.timing[TM][self.BIT0MAXSTRECHED]+self.accuracy
+        totalTM             = total <= self.BIT0MAXSTRECHEDTOTAL+2*self.accuracy
+        withoutStrechedZero = ((self.timingModeNo == self.timingRCNdecoder     and self.rcnAllowStrechedZero == 'no') 
+                            or (self.timingModeNo == self.timingRCNcomplianceT and self.rcnAllowStrechedZero == 'no')
+                            or (self.timingModeNo == self.timingRCNcomplianceS and self.rcnAllowStrechedZero == 'no')
+                            or (self.timingModeNo == self.timingExperimental   and self.rcnAllowStrechedZero == 'no'))
+
+        withStrechedZero    = ((self.timingModeNo == self.timingRCNdecoder     and self.rcnAllowStrechedZero == 'yes') 
+                            or (self.timingModeNo == self.timingRCNcomplianceT and self.rcnAllowStrechedZero == 'yes')
+                            or (self.timingModeNo == self.timingRCNcomplianceS and self.rcnAllowStrechedZero == 'yes')
+                            or (self.timingModeNo == self.timingExperimental   and self.rcnAllowStrechedZero == 'yes')
+                            or (self.timingModeNo == self.timingNMRAdecoder)
+                            or (self.timingModeNo == self.timingNMRAcompliance))
+        if self.timingCompare == 'on':
+            minTE1   = self.timing[TE][self.BIT0MIN]-self.accuracy <= part1
+            maxTE1   = part1 <= self.timing[TE][self.BIT0MAX]+self.accuracy
+            maxStTE1 = part1 <= self.timing[TE][self.BIT0MAXSTRECHED]+self.accuracy
+            minTE2   = self.timing[TE][self.BIT0MIN]-self.accuracy <= part2
+            maxTE2   = part2 <= self.timing[TE][self.BIT0MAX]+self.accuracy
+            maxStTE2 = part2 <= self.timing[TE][self.BIT0MAXSTRECHED]+self.accuracy
+        if (    (    withoutStrechedZero
+                 and ((minTM1 or minTE1) and (maxTM1 or maxTE1))      #'0' part1
+                 and ((minTM2 or minTE2) and (maxTM2 or maxTE2))      #'0' part2
+                )
+                or
+                (    withStrechedZero
+                 and ((minTM1 or minTE1) and (maxStTM1 or maxStTE1))  #'0' part1
+                 and ((minTM2 or minTE2) and (maxStTM2 or maxStTE2))  #'0' part2
+                 and totalTM                                          #'0' max part1+part2
+                )
+            ):
+            if minTM1 == False and minTE1 == True:
+                v1 = '{:.2f}'.format(part1) + 'µs'
+                v2 = '{:.2f}'.format(self.timing[TM][self.BIT0MIN]) + 'µs'
+                self.putx(self.edge_1, self.edge_2, [Ann.VARIANCE1, ['1. half bit to short: actual: ' + v1 + ', minimum: ' + v2, v1 + '/' + v2]])
+            if minTM2 == False and minTE2 == True:
+                v1 = '{:.2f}'.format(part2) + 'µs'
+                v2 = '{:.2f}'.format(self.timing[TM][self.BIT0MIN]) + 'µs'
+                self.putx(self.edge_2, self.edge_3, [Ann.VARIANCE1, ['2. half bit to short: actual: ' + v1 + ', minimum: ' + v2, v1 + '/' + v2]])
+            if withoutStrechedZero:
+                if maxTM1 == False and maxTE1 == True:
+                    v1 = '{:.2f}'.format(part1) + 'µs'
+                    v2 = '{:.2f}'.format(self.timing[TM][self.BIT0MAX]) + 'µs'
+                    self.putx(self.edge_1, self.edge_2, [Ann.VARIANCE1, ['1. half bit to long: actual: ' + v1 + ', maximum: ' + v2, v1 + '/' + v2]])
+                elif maxTM2 == False and maxTE2 == True:
+                    v1 = '{:.2f}'.format(part2) + 'µs'
+                    v2 = '{:.2f}'.format(self.timing[TM][self.BIT0MAX]) + 'µs'
+                    self.putx(self.edge_2, self.edge_3, [Ann.VARIANCE1, ['2. half bit to long: actual: ' + v1 + ', maximum: ' + v2, v1 + '/' + v2]])
+            if withStrechedZero:
+                if maxStTM1 == False and maxStTE1 == True:
+                    v1 = '{:.2f}'.format(part1) + 'µs'
+                    v2 = '{:.2f}'.format(self.timing[TM][self.BIT0MAXSTRECHED]) + 'µs'
+                    self.putx(self.edge_1, self.edge_2, [Ann.VARIANCE1, ['1. half bit to long: actual: ' + v1 + ', maximum: ' + v2, v1 + '/' + v2]])
+                if maxStTM2 == False and maxStTE2 == True:
+                    v1 = '{:.2f}'.format(part2) + 'µs'
+                    v2 = '{:.2f}'.format(self.timing[TM][self.BIT0MAXSTRECHED]) + 'µs'
+                    self.putx(self.edge_2, self.edge_3, [Ann.VARIANCE1, ['2. half bit to long: actual: ' + v1 + ', maximum: ' + v2, v1 + '/' + v2]])
+            return True
+        return False
+
+    def isStreched0Bit(self, part1, part2):
+        TM    = self.timingModeNo
+        TE    = self.timingExperimental
+        maxTM = maxTE = max(self.timing[TM][self.BIT1TOLERANCE], 2*self.accuracy)
+        if self.timingCompare == 'on':
+            maxTE = max(self.timing[TE][self.BIT1TOLERANCE], 2*self.accuracy)
+        if abs(part1-part2) > (maxTM or maxTE):  #BIT1TOLERANCE used
+            return True
+        return False
+
+    def isRailcomCutout(self, sample):
+        ##[RCN-217 2.4]
+        TM = self.timingModeNo
+        if (     self.timingModeNo != self.timingNMRAcompliance
+             and self.timingModeNo != self.timingRCNcomplianceT
+             and self.timingModeNo != self.timingRCNcomplianceS
+             and self.railcomCutoutPossible == True                                                                                   #only next to stopbit
+             and self.RAILCOMCUTOUTMIN-self.accuracy <= sample <= (self.RAILCOMCUTOUTMAX + 2*(self.timing[TM][self.BIT1MAX]+self.accuracy) )
+           ):
+            return True
+        return False
+
+    def isBroken1BitAfterRailcomCutout(self, total):
+        ##[RCN-217 2.4]
+        TM = self.timingModeNo
+        if (    self.broken1bitPossible == True
+            and total <= self.timing[TM][self.BIT1MAX]+self.accuracy 
+            ):
+            return True
+        return False
+
 
     def decode(self):
         if self.samplerate is None:
-            raise SamplerateError('Cannot decode without samplerate.')
-        elif (self.samplerate < 25000):
-            raise SamplerateError('Minimum samplerate >= 25kHz.')
-        accuracy = 1/self.samplerate*1000000  #µs (accuracy is depending on sample rate, it is about recognizing a packet, not checking the correct timing)
+            raise SamplerateError('Cannot decode without samplerate')
+        if self.samplerate <= 0:
+            raise SamplerateError('Cannot decode with samplerate 0 or less')
 
-        self.wait({0: self.cond1})
-        self.edge_1 = self.samplenum
-        self.wait({0: self.cond2})
-        self.edge_2 = self.samplenum
+        #initialize
+        self.half1Counter = 0
+        self.wait({0: 'e'})
+        self.edge_1     = self.samplenum
+        self.wait({0: 'e'})
+        self.edge_2     = self.samplenum
 
+        #set accuracy
+        if self.timingModeNo == self.timingExperimental and self.ExpAccurancy >= 0:
+            self.accuracy = self.ExpAccurancy
+        else:
+            self.accuracy = 1/self.samplerate*1000000  #µs (self.accuracy is depending on sample rate, it is about recognizing a packet, not checking the correct timing)
+        
         #Info at the start
         output_1      = 'Samplerate: '
         if self.samplerate/1000 < 1000:
             output_1 += '{:.0f}'.format(self.samplerate/1000) + ' kHz'
         else:
             output_1 += '{:.0f}'.format(self.samplerate/1000000) + ' MHz'
-        output_1     += ', Accuracy: '    
-        if accuracy >= 1:
-            output_1 += '{:.0f}'.format(accuracy) + ' µs'
+        output_1     += ', this results in an accuracy deviation of: '    
+        if self.accuracy >= 1:
+            output_1 += '{:.0f}'.format(self.accuracy) + ' µs'
         else:
-            output_1 += '{:.0f}'.format(accuracy*1000) + ' ns'
-        self.putx(self.edge_1, self.edge_2, [Ann.FRAME_OTHER, [output_1]])
-        
-        firstChangeCond = True
+            output_1 += '{:.0f}'.format(self.accuracy*1000) + ' ns'
+        self.putx(0, self.edge_1, [Ann.BITS_OTHER, [output_1]])
+
         while True:
-            output_1       = ''
-            unknownTiming  = False
-            railcomCutout  = False
-            strechedZero   = False
-            
-            self.wait({0: self.cond1})
-            self.edge_3 = self.samplenum
-            self.wait({0: self.cond2})
-            self.edge_4 = self.samplenum  #Look into the future to filter out short pulses (see below)
-            
             '''
                              ______        ____________              ______
             signal        __|      |______|            |____________|      |__
@@ -1295,110 +1616,208 @@ class Decoder(srd.Decoder):
                             |part 1|part 2|   part 1   |   part 2   |part 1|
                             |    total    |          total          |
             '''
-            total = (self.edge_3-self.edge_1)/self.samplerate*1000000 #µs
-            part1 = (self.edge_2-self.edge_1)/self.samplerate*1000000 #µs
-            part2 = (self.edge_3-self.edge_2)/self.samplerate*1000000 #µs
-            
-            ##[RCN-210 5]
-            if (     52-accuracy <= part1 <= 64+accuracy              #'1' part1 = 52us - 64us
-                 and 52-accuracy <= part2 <= 64+accuracy              #'1' part2 = 52us - 64us
-                 and abs(part1-part2) <= max(6, 2*accuracy)           #difference part1/part2 = +/- 6us or 2*accuracy
-                ): 
-                value = '1'
-            
-            elif (   (    90-accuracy <= part1 <= 10000+accuracy      #'0' part1 = 90us - 10000us
-                      and 90-accuracy <= part2 <= 119  +accuracy)     #'0' part2 = 90us - 116us
-                  or (    90-accuracy <= part2 <= 10000+accuracy      #'0' part2 = 90us - 10000us
-                      and 90-accuracy <= part1 <= 119  +accuracy)     #'0' part1 = 90us - 116us
-                 ):
-                value = '0'
-                if (2*119)+accuracy <= total <= 12000+accuracy:       #min. 2*half'0'
-                    output_1 = 'stretched zero?'
-                    strechedZero = True
-            
-            elif 90+52-accuracy <= total <= 64+119+accuracy:          #half '0' + half '1' -> adjust edge detection
-                if self.cond1 == 'r':
-                    self.cond1 = 'f'  #falling-edge
-                    self.cond2 = 'r'  #raising-edge
-                else:
-                    self.cond1 = 'r'  #falling-edge
-                    self.cond2 = 'f'  #raising-edge
-                if firstChangeCond == True:                           #first sync is no error
-                    firstChangeCond = False
-                else:    
-                    self.put_signal([Ann.ERROR,       ['Edge-Detection changed to falling edge - should not occur - dirty signal?']])
-                    self.put_signal([Ann.FRAME_OTHER, ['Resynchronize (Wait for preamble)', 'Resynchronize','Resync.','R']])
-                self.syncSignal   = True                              #resynchronize
-                self.decodedBytes = []
-                self.setNextStatus('WAITINGFORPREAMBLE')              #wait for new preamble
-                self.wait({0: 'e'})                                   #skip one edge
-                self.edge_1 = self.edge_4
+            self.edge_0 = self.edge_1
+            self.edge_3 = None
+            self.edge_4 = None
+            value       = '?'
+            value_short = '?'
+            part1       = (self.edge_2-self.edge_1)/self.samplerate*1000000 #µs
+
+            ## error-messages
+            output_1 = ''
+            if self.samplerate < 25000:
+                output_1 = 'Samplerate must be >= 25kHz'
+            if (self.timingModeNo == self.timingINVALID): 
+                output_1 = 'Samplerate too inaccurate for compliance testing: Please use at least 2Mhz'
+            if (self.options['Search_acc_addr'] != '' and self.acc_addr_search == -255):
+                output_1 = 'Search: accessory address invalid (use 1-2048)';
+            if (self.options['Search_dec_addr'] != '' and self.dec_addr_search == -255):
+                output_1 = 'Search: decoder address invalid (use 0-10239)';
+            if (self.options['Search_cv'] != '' and self.cv_addr_search == -255):
+                output_1 = 'Search: CV address invalid (use 1-16777216)';
+            if (self.options['Search_byte'] != '' and self.byte_search == -255):
+                output_1 = 'Search: invalid byte value (use 0-255 or 0b00000000-0b11111111 or 0x00-0xff)';
+            if ((self.timingModeNo == self.timingNMRAcompliance or self.timingModeNo == self.timingRCNcomplianceT or self.timingModeNo == self.timingRCNcomplianceS) and self.preambleBitsCount < 10):
+                output_1 = '"compliance mode: min. preamble bits" must be greater than 9';
+            if ((self.timingModeNo == self.timingExperimental or self.timingCompare == 'on') and self.B1min < 0):
+                output_1 = 'Exp: invalid value: "1-bit half min." must be greater than 0';
+            if ((self.timingModeNo == self.timingExperimental or self.timingCompare == 'on') and self.B1max < 0):
+                output_1 = 'Exp: invalid value: "1-bit half max." must be greater than 0';
+            if ((self.timingModeNo == self.timingExperimental or self.timingCompare == 'on') and self.B1min > self.B1max):
+                output_1 = 'Exp: invalid value: "1-bit half min." is greater "1-bit half max."';
+            if ((self.timingModeNo == self.timingExperimental or self.timingCompare == 'on') and self.B1tolerance < 0):
+                output_1 = 'Exp: invalid value: "1-bit tolerance" must be greater than 0';
+            if ((self.timingModeNo == self.timingExperimental or self.timingCompare == 'on') and self.B0min < 0):
+                output_1 = 'Exp: invalid value: "0-bit half min." must be greater than 0';
+            if ((self.timingModeNo == self.timingExperimental or self.timingCompare == 'on') and self.B0max < 0):
+                output_1 = 'Exp: invalid value: "0-bit half max." must be greater than 0';
+            if ((self.timingModeNo == self.timingExperimental or self.timingCompare == 'on') and self.B0min > self.B0max):
+                output_1 = 'Exp: invalid value: "0-bit half min." is greater "0-bit half max."';
+            if ((self.timingModeNo == self.timingExperimental or self.timingCompare == 'on') and self.B0max_streched < 0):
+                output_1 = 'Exp: invalid value: "0-bit streched" must be greater than 0';
+            if ((self.timingModeNo == self.timingExperimental or self.timingCompare == 'on') and self.B0min > self.B0max_streched):
+                output_1 = 'Exp: invalid value: "0-bit half min." is greater "0-bit streched"';
+            if ((self.timingModeNo == self.timingExperimental or self.timingCompare == 'on') and self.B0max > self.B0max_streched):
+                output_1 = 'Exp: invalid value: "0-bit half max." is greater "0-bit streched"';
+
+            if not output_1 == '':
+                self.wait({'skip': 99}) #arbitrarily chosen value
+                self.edge_3 = self.samplenum
+                self.put_signal([Ann.ERROR, [output_1, 'Error', 'E']])
+                self.wait({0: 'e'})
+                self.edge_1 = self.edge_3
                 self.edge_2 = self.samplenum
                 continue
-            
-            else:
-                output_1      = 'unknown timing'
-                unknownTiming = True
 
-            #filter out short pulses
-            if self.ignoreInterferingPulse == 'yes':
-                output_2 = 'Short pulse ignored'
-                if      (self.edge_4 - self.edge_3)/self.samplerate*1000000 <= self.maxInterferingPulseWidth\
-                    and (self.edge_3 - self.edge_2)/self.samplerate*1000000 <= self.maxInterferingPulseWidth:
-                    self.edge_2 = int((self.edge_2 + self.edge_4) / 2) #not quite accurate but sufficient enough
-                    self.putx(self.edge_2, self.edge_4, [Ann.ERROR, [output_2]])
-                    continue
-                elif (self.edge_4 - self.edge_3)/self.samplerate*1000000 <= self.maxInterferingPulseWidth\
-                    and value not in ['0', '1']:
-                    self.putx(self.edge_3, self.edge_4, [Ann.ERROR, [output_2]])
-                    continue
-                elif (self.edge_3 - self.edge_2)/self.samplerate*1000000 <= self.maxInterferingPulseWidth: 
-                    self.putx(self.edge_2, self.edge_3, [Ann.ERROR, [output_2]])
-                    self.edge_2 = self.edge_4
-                    continue
 
-            if unknownTiming == True or strechedZero == True:
-                if strechedZero == True:
-                    value_2   = '0 - ({:.0f}'.format(total) + 'µs=' + '{:.0f}'.format(part1) + 'µs+' + '{:.0f}'.format(part2) + 'µs)'
-                else:
-                    value     = '{:.0f}'.format(total) + 'µs=' + '{:.0f}'.format(part1) + 'µs+' + '{:.0f}'.format(part2) + 'µs'
-                value_long    = '{:.0f}'.format(total) + 'µs=' + '{:.0f}'.format(part1) + 'µs+' + '{:.0f}'.format(part2) + 'µs'
-                value_short   = '{:.0f}'.format(total) + 'µs'
-
-            ##[RCN-217 2.4]
-            if 454-accuracy <= total <= 488+119+6+accuracy:           #454us - 488us (+119+6=next 1-bit)
-                if output_1 == '':
-                    output_1 = 'Railcom cutout?'
-                else:
-                    output_1 = 'Railcom cutout or ' + output_1
-                railcomCutout = True
-            
-            if unknownTiming == True and railcomCutout == False:      #resynchronize
-                self.syncSignal   = True
-                self.decodedBytes = []
-                self.setNextStatus('WAITINGFORPREAMBLE')              #wait for new preamble
-                self.put_signal([Ann.FRAME_OTHER, ['Resynchronize (Wait for preamble)', 'Resynchronize','Resync.','R']])
-                self.put_signal([Ann.ERROR,       [output_1 + ' - should not occur - dirty signal?']])
-            elif output_1 != '':
-                self.put_signal([Ann.FRAME_OTHER, [output_1]])
+            ## Synchronization: search for preamble 
+            if self.dccStatus  == 'SYNCRONIZESIGNAL':
+                # half '1'?
+                if self.isHalf1Bit(part1):
+                    self.half1Counter += 1
+                    self.putx(self.edge_1, self.edge_2, [Ann.BITS_OTHER,  ['half 1 bit', '½ 1']])
+                    self.putx(self.edge_1, self.edge_2, [Ann.FRAME_OTHER, ['Synchronize (' + str(self.half1Counter) + '/min' + str(self.minCountPreambleBits*2) + ')', 'Sync', 'S']])
+                    self.edge_0 = self.edge_1
+                    self.edge_1 = self.edge_2
+                    self.wait({0: 'e'})
+                    self.edge_2 = self.samplenum
+                    continue
                     
-            if self.syncSignal == True:
-                if value in ['0', '1']:
-                    if strechedZero == True:
-                        self.put_signal([Ann.BITS_OTHER, [value_2 + ' (sync in progress)', value_2 + ' (sync)', value_2]])
-                    else:
-                        self.put_signal([Ann.BITS,       [value + ' (sync in progress)', value + ' (sync)', value]])
+                # <> half '1'    
                 else:
-                    self.put_signal(    [Ann.BITS_OTHER, [value + ' (sync in progress)', value_long + ' (sync)', value_short]])
+                    self.wait({0: 'e'})
+                    self.edge_3     = self.samplenum
+                    part2 = (self.edge_3-self.edge_2)/self.samplerate*1000000 #µs
+                    total = part1+part2
+
+                    # '0' bit?
+                    if self.is0Bit(part1, part2):
+                        # valid preamble found?
+                        if self.half1Counter >= (self.minCountPreambleBits*2):
+                            self.syncSignal   = False
+                            self.half1Counter = 0
+                            self.setNextStatus('PREAMBLEFOUND')
+                        # no valid preamble
+                        else:
+                            if self.half1Counter == 0:
+                                self.putx(self.edge_1, self.edge_2, [Ann.FRAME_OTHER, ['Synchronize (wait for half 1 bits)', 'Synchronize', 'Sync', 'S']])
+                                self.putx(self.edge_2, self.edge_3, [Ann.FRAME_OTHER, ['Synchronize (wait for half 1 bits)', 'Synchronize', 'Sync', 'S']])
+                            else:
+                                self.putx(self.edge_1, self.edge_3, [Ann.BITS_OTHER,  ['0']])
+                                self.putx(self.edge_1, self.edge_3, [Ann.FRAME_OTHER, ['Synchronize (wait for preamble) (too few half 1 bits (' + '{:.0f}'.format(self.half1Counter) + '/min' + '{:.0f}'.format(self.minCountPreambleBits*2) + '))', 'Synchronize', 'Sync.', 'S']])
+
+
+                            self.half1Counter = 0
+                            self.wait({0: 'e'})
+                            self.edge_1 = self.edge_3
+                            self.edge_2 = self.samplenum
+                            continue
+                            
+                    # invalid/unknown timing
+                    else:
+                        self.putx(self.edge_1, self.edge_2, [Ann.BITS_OTHER,  ['{:.2f}'.format(part1) + 'µs']])
+                        self.putx(self.edge_1, self.edge_2, [Ann.FRAME_OTHER, ['Synchronize (wait for half 1 bits)', 'Sync', 'S']])
+                        self.edge_1     = self.edge_2
+                        self.edge_2     = self.edge_3
+                        self.setNextStatus('SYNCRONIZESIGNAL')
+                        continue
+            ## No synchronization            
             else:
-                if value in ['0', '1']:
-                    if strechedZero == True:
-                        self.put_signal([Ann.BITS_OTHER, [value_2, '0 - (' + value_long + ')', '0']])
-                    else:
-                        self.put_signal([Ann.BITS,       [value]])
-                else:
-                    self.put_signal(    [Ann.BITS_OTHER, [value, value_long, value_short]])
+                self.wait({0: 'e'})
+                self.edge_3     = self.samplenum
+                part2 = (self.edge_3-self.edge_2)/self.samplerate*1000000 #µs
+                total = part1+part2
+
+                
+            ## 1-Bit?
+            if self.is1Bit(part1, part2):
+                value = '1'
+                self.railcomCutoutPossible = False
+                self.broken1bitPossible    = False
+
+            ## 0-Bit?
+            elif self.is0Bit(part1, part2):
+                value = '0'
+                ## could be a railcom cutout?
+                if self.isRailcomCutout(total):
+                    self.railcomCutoutPossible  = False
+                    self.broken1bitPossible     = True
+                    self.lastPacketWasStop      = False
+                    self.put_signal([Ann.BITS, ['Railcom cutout', 'Railcom', 'R']])
+                    self.wait({0: 'e'})
+                    self.edge_1 = self.edge_3
+                    self.edge_2 = self.samplenum
+                    self.setNextStatus('WAITINGFORPREAMBLE')
+                    continue
+                self.railcomCutoutPossible = False
+                self.broken1bitPossible    = False
+                if self.isStreched0Bit(part1, part2):
+                    TM = self.timingModeNo
+                    self.put_signal([Ann.INFO, ['Streched 0-bit: Δ:' + '{:.2f}'.format(abs(part1-part2)) + 'µs (' + '{:.2f}'.format(part1) + 'µs/' + '{:.2f}'.format(part2) + 'µs)', 'Δ' + '{:.2f}'.format(abs(part1-part2)) + 'µs']])
+
+            ## Railcomcutout?
+            elif self.isRailcomCutout(total):
+                self.railcomCutoutPossible  = False
+                self.broken1bitPossible     = True
+                self.lastPacketWasStop      = False
+                self.put_signal([Ann.BITS, ['Railcom cutout', 'Railcom', 'R']])
+                self.wait({0: 'e'})
+                self.edge_1 = self.edge_3
+                self.edge_2 = self.samplenum
+                self.setNextStatus('WAITINGFORPREAMBLE')
+                continue
+
+            ## broken 1-bit next to railcom cutout?
+            elif self.isBroken1BitAfterRailcomCutout(total):
+                self.broken1bitPossible = False
+                self.putx(self.edge_1, self.edge_3, [Ann.FRAME_OTHER, ['broken 1-bit']])
+                self.putx(self.edge_1, self.edge_3, [Ann.BITS_OTHER,  ['ignored broken 1-bit after Railcom cutout', 'ignored']])
+                self.wait({0: 'e'})
+                self.edge_1 = self.edge_3
+                self.edge_2 = self.samplenum
+                self.setNextStatus('WAITINGFORPREAMBLE')
+                continue
+
+            ## unknown timing
+            else:
+                # filter out short pulses
+                if self.ignoreInterferingPulse == 'yes':
+                    self.wait({0: 'e'})
+                    self.edge_4     = self.samplenum  #Look into the future to filter out short pulses (see below)
+                    output_1 = 'Short pulse ignored'
+                    if      (self.edge_4 - self.edge_3)/self.samplerate*1000000 <= self.maxInterferingPulseWidth\
+                        and (self.edge_3 - self.edge_2)/self.samplerate*1000000 <= self.maxInterferingPulseWidth:
+                        self.edge_2 = int((self.edge_2 + self.edge_4) / 2) #not quite accurate but sufficient enough
+                        self.putx(self.edge_2, self.edge_4, [Ann.INFO, [output_1 + ' (1)']])
+                        continue
+                    elif (self.edge_4 - self.edge_3)/self.samplerate*1000000 <= self.maxInterferingPulseWidth:
+                        self.putx(self.edge_3, self.edge_4, [Ann.INFO, [output_1 + ' (2)']])
+                        continue
+                    elif (self.edge_3 - self.edge_2)/self.samplerate*1000000 <= self.maxInterferingPulseWidth: 
+                        self.putx(self.edge_2, self.edge_3, [Ann.INFO, [output_1 + ' (3)']])
+                        self.edge_2     = self.edge_4
+                        continue
+                        
+                # unknown timing
+                value       = '{:.2f}'.format(total) + 'µs=' + '{:.2f}'.format(part1) + 'µs+' + '{:.2f}'.format(part2) + 'µs'
+                value_short = '{:.2f}'.format(total) + 'µs'
+                self.put_signal([Ann.FRAME_OTHER, ['Resynchronize (wait for preamble)', 'Resynchronize', 'Resync.', 'R']])
+                self.put_signal([Ann.ERROR,       ['unknown timing - should not occur - dirty signal?', 'Error', 'E']])
+                self.setNextStatus('SYNCRONIZESIGNAL')
+
+
+            if value not in ['0', '1']:
+                self.put_signal([Ann.BITS_OTHER, [value, value_short]])
+                self.setNextStatus('SYNCRONIZESIGNAL')
+            elif self.dccStatus != 'SYNCRONIZESIGNAL':
+                self.put_signal([Ann.BITS,       [value]])
+                self.processFoundByte(self.edge_1, self.edge_3, value)
+
+
+            if self.edge_4 == None:
+                self.wait({0: 'e'})
+                self.edge_4 = self.samplenum
             
-            self.collectDataBytes(self.edge_1, self.edge_3, value)
-            self.edge_1 = self.edge_3
-            self.edge_2 = self.edge_4
+            self.edge_1     = self.edge_3
+            self.edge_2     = self.edge_4
+            
