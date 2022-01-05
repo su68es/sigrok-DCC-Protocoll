@@ -16,17 +16,21 @@ Features:
 - Consideration of speed mode (CV29)
 - Evaluation adjustable for operation/service mode
 - Adjustable offset for interpretation accessory addresses
+
 - Search functions for
 -- accessory address (specify address in decimal)
 -- decoder address (specify address in decimal)
 -- CV (specify CV in decimal)
 -- single byte ('and' linked if address or CV filled)
 --- (e.g. 3, 0xFF, 0b01101001)
+-- command (searches commands in textform)
+--- (e.g. pom, basic acc)
 -- usage: 
    1. enter value
    2. press 'zoom to fit'-button, 
    3. search for occurrences
    4. zoom to occurrence
+
 - Different timing modes adjustable
 -- NMRA/RCN decoding: 
    Acts like a decoder with according timing
@@ -34,13 +38,13 @@ Features:
    Tests the signal at the output of a command station
    according to NMRA/RCN timing
    (no Railcom cutout allowed)
-   
 -- Experimental: 
 --- user adjustable values for tests
 --- possibility to compare timings:
     For the detection the values of the selected mode
     as well as the set experimental values are used
     and the difference is displayed
+
 - 'RCN/Exp. mode: allow/reject streched 0-bits'
 - 'compliance mode: min. preamble bits':
   in decoder mode fixed to 10 bits
@@ -56,8 +60,8 @@ Features:
   See file pd.py, below comment '## used settings for timing'.
 
 Used norms:
-RCN 210, 211, 212, 213, 214, 216, 217
-(NMRA S-9.2, S-9.2.1, S-9.2.3, S-9.3.2)
+RCN 210, 211, 212, 213, 214, 216, 217, 218
+(NMRA s-9.2, s-9.2.1 Draft, s-9.2.1.1 Draft, s-9.2.3, s-9.3.2)
 http://www.vhdm.de
 https://www.nmra.org
 
