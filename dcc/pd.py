@@ -2,7 +2,7 @@
 ## This file is part of the libsigrokdecode project.
 ##
 ## Copyright (C) 2013-2021 Sven Bursch-Osewold
-##               2021      Roland Noell  
+##               2021-2022 Roland Noell  
 ##
 ## This program is free software; you can redistribute it and/or modify
 ## it under the terms of the GNU General Public License as published by
@@ -22,12 +22,13 @@
 '''
 Used norms:
 RCN-210 (01.12.2019)
-RCN-211 (02.12.2018) 
+RCN-211 (10.09.2021)
 RCN-212 (06.12.2020)
 RCN-213 (27.07.2015)
-RCN-214 (02.12.2018)
+RCN-214 (10.09.2021)
 RCN-216 (17.12.2017)
 RCN-217 (01.12.2019)
+RCN-218 (10.09.2021)
 '''
 
 import sigrokdecode as srd
@@ -39,7 +40,7 @@ class ConfigParamError(Exception):
     pass
 
 class Ann:
-    BITS, BITS_OTHER, FRAME, FRAME_OTHER, DATA, DATA_ACC, DATA_DEC, DATA_CV, COMMAND, SEARCH_ACC, SEARCH_DEC, SEARCH_CV, SEARCH_BYTE, INFO, ERROR, VARIANCE1, VARIANCE2 = range(17)
+    BITS, BITS_OTHER, FRAME, FRAME_OTHER, DATA, DATA_ACC, DATA_DEC, DATA_CV, COMMAND, INFO, ERROR, VARIANCE1, VARIANCE2, SEARCH_ACC, SEARCH_DEC, SEARCH_CV, SEARCH_BYTE, SEARCH_COMMAND = range(18)
 
 class Decoder(srd.Decoder):
     api_version = 3
@@ -51,7 +52,9 @@ class Decoder(srd.Decoder):
     inputs      = ['logic']
     outputs     = []
     tags        = ['Encoding']
-
+    
+    ##software version of DCC decoder
+    version     = '3.0.0'
 
     ## used settings for timing 
     ## half1BitMin, half1BitMax, max1BitTolerance, half0BitMin, half0BitMax, half0BitMaxStreched
@@ -107,24 +110,25 @@ class Decoder(srd.Decoder):
         ('data3',     'Decoder address'),
         ('data4',     'CV'),
         ('command',   'Command'),
-        ('search1',   'Accessory address'),
-        ('search2',   'Decoder address'),
-        ('search3',   'CV'),
-        ('search4',   'Byte'),
         ('info',      'Info'),
         ('error',     'Error'),
         ('variance1', 'Variance (compare)'),
         ('variance2', 'Variance (compare)'),
+        ('search1',   'Accessory address'),
+        ('search2',   'Decoder address'),
+        ('search3',   'CV'),
+        ('search4',   'Byte'),
+        ('search5',   'Command'),
     )
     annotation_rows = (
-        ('bits_',     'Bits',       (Ann.BITS, Ann.BITS_OTHER,)),
-        ('frame_',    'Frame',      (Ann.FRAME, Ann.FRAME_OTHER,)),
-        ('data_',     'Data',       (Ann.DATA_ACC, Ann.DATA_DEC, Ann.DATA_CV, Ann.DATA,)),
-        ('command_',  'Command',    (Ann.COMMAND,)),
-        ('search_',   'Search',     (Ann.SEARCH_ACC, Ann.SEARCH_DEC, Ann.SEARCH_CV, Ann.SEARCH_BYTE,)),
-        ('info_',     'Info',       (Ann.INFO,)),
-        ('error_',    'Error',      (Ann.ERROR,)),
-        ('variance_', 'Variance',   (Ann.VARIANCE1, Ann.VARIANCE2,)),
+        ('bits_',     'Bits',         (Ann.BITS, Ann.BITS_OTHER,)),
+        ('frame_',    'Frame',        (Ann.FRAME, Ann.FRAME_OTHER,)),
+        ('data_',     'Data/Command', (Ann.DATA_ACC, Ann.DATA_DEC, Ann.DATA_CV, Ann.DATA,)),
+        ('command_',  'Command/Key',  (Ann.COMMAND,)),
+        ('info_',     'Info',         (Ann.INFO,)),
+        ('error_',    'Error',        (Ann.ERROR,)),
+        ('variance_', 'Variance',     (Ann.VARIANCE1, Ann.VARIANCE2,)),
+        ('search_',   'Search',       (Ann.SEARCH_ACC, Ann.SEARCH_DEC, Ann.SEARCH_CV, Ann.SEARCH_BYTE, Ann.SEARCH_COMMAND,)),
     )
     options = (
         {'id': 'CV_29_1',                 'desc': 'CV29 Bit 1',                                   'default': '1: 28/128 speed mode', 'values': ('1: 28/128 speed mode', '0: 14 speed mode') },
@@ -134,6 +138,7 @@ class Decoder(srd.Decoder):
         {'id': 'Search_dec_addr',         'desc': 'search decoder address [decimal]',             'default': '' },
         {'id': 'Search_cv',               'desc': 'search CV [decimal]',                          'default': '' },
         {'id': 'Search_byte',             'desc': 'search byte [dec/0b/0x] (e.g. 3, 0xFF)',       'default': '' },
+        {'id': 'Search_command',          'desc': 'search command [text] (e.g. DCC-A)',           'default': '' },
         {'id': 'Timing_mode',             'desc': 'timing mode',                                  'default': 'NMRA decoding', 'values': ('NMRA decoding', 'RCN decoding', 'NMRA compliance testing', 'RCN compliance testing track', 'RCN compliance testing station', 'Experimental') },
         {'id': 'RCN_allow_streched_zero', 'desc': 'RCN/Exp mode: allow streched 0-bits',          'default': 'no', 'values': ('no', 'yes') },
         {'id': 'Preamble_bits_count',     'desc': 'compliance mode: min. preamble bits',          'default': 17 },
@@ -178,6 +183,44 @@ class Decoder(srd.Decoder):
              'Nov. ', #11
              'Dec. '  #12
             ]
+            
+    def crc_calc(self, data):
+        result = 0
+        if (data & 1): result ^= 0x5e
+        if (data & 2): result ^= 0xbc
+        if (data & 4): result ^= 0x61
+        if (data & 8): result ^= 0xc2
+        if (data & 0x10): result ^= 0x9d
+        if (data & 0x20): result ^= 0x23
+        if (data & 0x40): result ^= 0x46
+        if (data & 0x80): result ^= 0x8c
+        return result
+    
+    def CRC(self, packetByte):
+        crc_value = 0
+        for i in range (0, len(packetByte)-1 -1):
+            crc_value = self.crc_calc(packetByte[i][0] ^ crc_value)
+        return crc_value
+            
+    def processCRC(self, pos, packetByte):
+        if pos+1 >= len(packetByte)-1:
+            self.put_packetbytes(packetByte, 0, len(packetByte)-1,     [Ann.ERROR, ['CRC or Checksum missing', 'Error', 'E']])
+        else:
+            pos, error = self.incPos(pos, packetByte)
+            if error == True: return pos, True
+            commandText1 = 'CRC'
+            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1]])
+            crcByte = packetByte[pos][0]
+            self.put_packetbyte(packetByte, pos, [Ann.DATA,    [hex(crcByte)]])
+            crcCalculated = self.CRC(packetByte)
+            if crcByte == crcCalculated:
+                output_1 = 'OK'
+                self.put_packetbyte(packetByte, pos,     [Ann.FRAME, ['CRC: ' + output_1, output_1]])
+            else:
+                output_1 = hex(crcByte) + '<>' + hex(crcCalculated)
+                self.put_packetbytes(packetByte, 0, len(packetByte)-2, [Ann.ERROR, ['CRC false', 'Error', 'E']])
+                self.put_packetbyte(packetByte, pos,     [Ann.FRAME_OTHER, ['CRC: ' + output_1, output_1]])
+        return pos, False
             
     def putx(self, start, end, data):
         self.put(start, end, self.out_ann, data)
@@ -230,6 +273,7 @@ class Decoder(srd.Decoder):
         self.preambleBitsCount      = self.options['Preamble_bits_count']
         self.ignoreInterferingPulse = self.options['Ignore_short_pulse']
         self.timingCompare          = self.options['Timing_compare']
+        self.command_search         = self.options['Search_command']
         
         if self.timingMode == 'NMRA decoding':
             self.timingModeNo         = self.timingNMRAdecoder
@@ -358,7 +402,13 @@ class Decoder(srd.Decoder):
             return
 
         pos      = 0  #position within packet
-        idPacket = packetByte[pos][0] 
+        idPacket = packetByte[pos][0]
+        commandText1 = ''
+        commandText2 = ''
+        commandText3 = ''
+        commandText4 = ''
+        commandText5 = ''
+        commandText6 = ''
 
         ##############
         ## Servicemode
@@ -374,7 +424,7 @@ class Decoder(srd.Decoder):
                         output_short = 'w, R:'
                     output_long  += str((packetByte[pos][0] & 0b111) + 1)
                     output_short += str((packetByte[pos][0] & 0b111) + 1)
-                    self.put_packetbyte(packetByte, pos, [Ann.DATA, [output_long, output_short]])
+                    self.put_packetbyte(packetByte, pos, [Ann.DATA,    [output_long, output_short]])
                     pos, error = self.incPos(pos, packetByte)
                     if error == True: return
                     if packetByte[pos-1][0] == 0b01111101 and packetByte[pos][0] == 1:
@@ -382,13 +432,14 @@ class Decoder(srd.Decoder):
                         self.put_packetbyte(packetByte, pos, [Ann.DATA, ['Register/Page Mode (outdated): Page Preset']])
                     else:
                         self.put_packetbyte(packetByte, pos, [Ann.DATA, [str(packetByte[pos][0])]])
-                    self.put_packetbytes(packetByte, pos-1, pos, [Ann.COMMAND, ['Register/Page Mode (outdated)']])
-                    
+                    commandText1 = 'Register/Page Mode (outdated)'
+                    self.put_packetbytes(packetByte, pos-1, pos, [Ann.COMMAND, [commandText1]])
                     validPacketFound = True
                 
                 elif packetByte[pos][0] >> 4 == 0b0111 and len(packetByte) == 4:
                     ##[RCN-214 2]
-                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Service Mode', 'Service']])
+                    commandText1 = 'Service Mode'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, 'Service']])
                     if (packetByte[pos][0] >> 2) & 0b11 == 0b01:
                         self.put_packetbyte(packetByte, pos, [Ann.DATA, ['Verify byte', 'v']])
                         pos, error = self.incPos(pos, packetByte)
@@ -437,7 +488,10 @@ class Decoder(srd.Decoder):
                             output_long  += ', 0'
                             output_short += ',0'
                         self.put_packetbyte(packetByte, pos, [Ann.DATA,    [output_long, output_short]])
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Operation, Position, Value', 'Op.,Pos,Value', 'O,P,V']])
+                        commandText1 = 'Operation, Position, Value'
+                        commandText2 = 'Op.,Pos,Value'
+                        commandText3 = 'O,P,V'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
                     
                     else:
                         self.put_packetbyte(packetByte, pos, [Ann.DATA, ['Reserved for future use', 'Res.']])
@@ -456,19 +510,26 @@ class Decoder(srd.Decoder):
                 if idPacket == 0:
                     dec_addr = 0
                     self.put_packetbyte(packetByte, pos, [Ann.DATA_DEC, ['Broadcast']])
-                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  ['Broadcast']])
+                    commandText1 = 'Broadcast'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  [commandText1]])
                 
                 elif 1 <= idPacket <= 127:
                     dec_addr = packetByte[pos][0] & 0b01111111
                     self.put_packetbyte(packetByte, pos, [Ann.DATA_DEC, [str(dec_addr)]])
-                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  ['Multi Function Decoder with 7 bit address', 'Decoder with 7 bit address', '7 bit addr.']])
+                    commandText1 = 'Multi Function Decoder with 7 bit address'
+                    commandText2 = 'Decoder with 7 bit address'
+                    commandText3 = '7 bit addr.'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  [commandText1, commandText2, commandText3]])
                 
                 elif 192 <= idPacket <= 231:
                     pos, error = self.incPos(pos, packetByte)
                     if error == True: return
                     dec_addr = ((packetByte[pos-1][0] & 0b00111111)*256) + packetByte[pos][0]
                     self.put_packetbytes(packetByte, pos-1, pos, [Ann.DATA_DEC, [str(dec_addr)]])
-                    self.put_packetbytes(packetByte, pos-1, pos, [Ann.COMMAND,  ['Multi Function Decoder with 14 bit address', 'Decoder with 14 bit address', '14 bit addr.']])
+                    commandText1 = 'Multi Function Decoder with 14 bit address'
+                    commandText2 = 'Decoder with 14 bit address'
+                    commandText3 = '14 bit addr.'
+                    self.put_packetbytes(packetByte, pos-1, pos, [Ann.COMMAND,  [commandText1, commandText2, commandText3]])
             
                 pos, error = self.incPos(pos, packetByte)
                 if error == True: return
@@ -479,32 +540,51 @@ class Decoder(srd.Decoder):
                     if   subcmd == 0b00000:
                         if dec_addr == 0:
                             ##[RCN-211 4.1]
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Decoder Reset packet', 'Dec. Reset', 'Reset']])
+                            commandText1 = 'Decoder Reset packet'
+                            commandText2 = 'Dec. Reset'
+                            commandText3 = 'Reset'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  [commandText1, commandText2, commandText3]])
                         else:
                             ##[RCN-212 2.5.1]
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Decoder Reset', 'Dec. Reset', 'Reset']])
+                            commandText1 = 'Decoder Reset'
+                            commandText2 = 'Dec. Reset'
+                            commandText3 = 'Reset'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  [commandText1, commandText2, commandText3]])
                     
                     elif subcmd == 0b00001:
                         ##[RCN-212 2.5.2]
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Decoder Hard Reset', 'Hard Reset', 'Reset']])
+                        commandText1 = 'Decoder Hard Reset'
+                        commandText2 = 'Hard Reset'
+                        commandText3 = 'Reset'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
                     
                     elif subcmd & 0b11110 == 0b00010:
                         ##[RCN-212 2.5.3]
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Factory Test Instruction', 'Fac. Test', 'Test']])
+                        commandText1 = 'Factory Test Instruction'
+                        commandText2 = 'Fac. Test'
+                        commandText3 = 'Test'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
                         validPacketFound = True
                     
                     elif subcmd & 0b11110 == 0b01010:
                         ##[RCN-212 2.5.4]
                         self.put_packetbyte(packetByte, pos, [Ann.DATA,    [str(packetByte[pos][0] & 0b00000001)]])
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Set Advanced Addressing (CV #29 Bit 5)', 'Set advanced addressing', 'Set adv. addr.']])
+                        commandText1 = 'Set Advanced Addressing (CV #29 Bit 5)'
+                        commandText2 = 'Set advanced addressing'
+                        commandText3 = 'Set adv. addr.'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
                     
                     elif subcmd == 0b01111:
                         ##[RCN-212 2.5.5]
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Decoder Acknowledgment Request', 'Dec. Ack Req.', 'Ack Req.']])
+                        commandText1 = 'Decoder Acknowledgment Request'
+                        commandText2 = 'Dec. Ack Req.'
+                        commandText3 = 'Ack Req.'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
                     
                     elif subcmd & 0b10000 == 0b10000:
                         ##[RCN-212 2.4.1]
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Consist Control']])
+                        commandText1 = 'Consist Control'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1]])
                         pos, error = self.incPos(pos, packetByte)
                         if error == True: return
                         if subcmd & 0b11110 == 0b10010:
@@ -513,18 +593,24 @@ class Decoder(srd.Decoder):
                             else:
                                 value = 'reverse'
                             self.put_packetbyte(packetByte, pos, [Ann.DATA,    [str(packetByte[pos][0] & 0b01111111) + ', dir:' + str(value)]])
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Set consist address', 'Set']])
+                            commandText2 = 'Set consist address'
+                            commandText3 = 'Set'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2, commandText3]])
                         else:
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Reserved']])
+                            commandText2 = 'Reserved'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
                     
                     else:
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Reserved']])
+                        commandText1 = 'Reserved'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1]])
                 
                 elif cmd == 0b001:  
                     ##[RCN-212 2.1] Advanced Operations Instruction
                     if subcmd == 0b11111:
                         ##[RCN-212 2.2.2]
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['128 Speed Step Control - Instruction']])
+                        commandText1 = '128 Speed Step Control - Instruction'
+                        commandText2 = '128 Speed Step'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2]])
                         pos, error = self.incPos(pos, packetByte)
                         if error == True: return
                         if dec_addr == 0:
@@ -553,7 +639,9 @@ class Decoder(srd.Decoder):
                         ##[RCN-212 2.2.3]
                         pos, error = self.incPos(pos, packetByte)
                         if error == True: return
-                        self.put_packetbytes(packetByte, pos-1, pos, [Ann.COMMAND, ['Special operation mode (unless received via consist address in CV#19)', 'Special operation mode']])
+                        commandText1 = 'Special operation mode (unless received via consist address in CV#19)'
+                        commandText2 = 'Special operation mode'
+                        self.put_packetbytes(packetByte, pos-1, pos, [Ann.COMMAND, [commandText1, commandText2]])
                         output_1 = ''
                         if (packetByte[pos][0] >> 2) & 0b11 == 0b00:
                             output_1 += 'Not part of a multiple traction'
@@ -571,19 +659,24 @@ class Decoder(srd.Decoder):
                             
                     elif subcmd == 0b11101:
                         ##[RCN-212 2.3.8]
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Analog Function Group']])
+                        commandText1 = 'Analog Function Group'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1]])
                         pos, error = self.incPos(pos, packetByte)
                         if error == True: return
                         if packetByte[pos][0] == 0b00000001:
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Volume control']])
+                            commandText2 = 'Volume control'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
                         elif 0b00010000 <= packetByte[pos][0] <= 0b00011111:
                             self.put_packetbyte(packetByte, pos, [Ann.DATA,    [str(packetByte[pos][0] & 0b00001111)]])
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Position control']])
+                            commandText2 = 'Position control'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
                         elif 0b10000000 <= packetByte[pos][0] <= 0b11111111:
                             self.put_packetbyte(packetByte, pos, [Ann.DATA,    [str(packetByte[pos][0] & 0b01111111)]])
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Any control']])
+                            commandText2 = 'Any control'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
                         else:
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Reserved']])
+                            commandText2 = 'Reserved'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
                         pos, error = self.incPos(pos, packetByte)
                         if error == True: return
                         self.put_packetbyte(packetByte, pos, [Ann.DATA,    [str(packetByte[pos][0])]])
@@ -591,7 +684,8 @@ class Decoder(srd.Decoder):
                     
                     elif subcmd == 0b11100:
                         ##[RCN-212 2.3.7]
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Speed, Direction, Function']])
+                        commandText1 = 'Speed, Direction, Function'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1]])
                         pos, error = self.incPos(pos, packetByte)
                         if error == True: return
                         if dec_addr == 0:
@@ -635,14 +729,21 @@ class Decoder(srd.Decoder):
                                 break
                                                     
                     else:
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Reserved']])
+                        commandText1 = 'Reserved'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1]])
                 
                 elif cmd in [0b010, 0b011]:  
                     ##[RCN-212 2.2.1]
                     if self.speed14 == True:
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Basis Speed and Direction Instruction 14 speed step mode (CV#29=0)', 'Speed + Dir. 14 step', 'Speed 14']])
+                        commandText1 = 'Basis Speed and Direction Instruction 14 speed step mode (CV#29=0)'
+                        commandText2 = 'Speed + Dir. 14 step'
+                        commandText3 = 'Speed 14'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
                     else:
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Basis Speed and Direction Instruction 28 speed step mode (CV#29=1)', 'Speed + Dir. 28 step', 'Speed 28']])
+                        commandText1 = 'Basis Speed and Direction Instruction 28 speed step mode (CV#29=1)'
+                        commandText2 = 'Speed + Dir. 28 step'
+                        commandText3 = 'Speed 28'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
                     output_long14  = ''
                     output_short14 = ''
                     output_long28  = ''
@@ -686,9 +787,15 @@ class Decoder(srd.Decoder):
                 elif cmd == 0b100:
                     ##[RCN-212 2.3.1]
                     if self.speed14 == True:
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Function Group One Instruction 14 speed step mode (CV#29=0)',     'FG1 14 step',     'FG1']])
+                        commandText1 = 'Function Group One Instruction 14 speed step mode (CV#29=0)'
+                        commandText2 = 'FG1 14 step'
+                        commandText3 = 'FG1'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
                     else:    
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Function Group One Instruction 28/128 speed step mode (CV#29=1)', 'FG1 28/128 step', 'FG1']])
+                        commandText1 = 'Function Group One Instruction 28/128 speed step mode (CV#29=1)'
+                        commandText2 = 'FG1 28/128 step'
+                        commandText3 = 'FG1'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
 
                     f = 1
                     output_long  = ''
@@ -711,7 +818,9 @@ class Decoder(srd.Decoder):
                     self.put_packetbyte(packetByte, pos, [Ann.DATA, [output_long, output_short]])
                 
                 elif cmd == 0b101:
-                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Function Group Two Instruction', 'FG2']])
+                    commandText1 = 'Function Group Two Instruction'
+                    commandText2 = 'FG2'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2]])
                     if subcmd & 0b10000 == 0b10000:
                         ##[RCN-212 2.3.2]
                         f = 5
@@ -735,7 +844,8 @@ class Decoder(srd.Decoder):
                     ##[RCN-212 2.3.4]
                     pos, error = self.incPos(pos, packetByte)
                     if error == True: return
-                    self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND, ['Future Expansion Instruction']])
+                    commandText1 = 'Future Expansion Instruction'
+                    self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND, [commandText1]])
                     if subcmd in [0b11111, 0b11110, 0b11100, 0b11011, 0b11010, 0b11001, 0b11000]: #F13 - F68
                         value = packetByte[pos][0]
                         f = 0
@@ -768,10 +878,13 @@ class Decoder(srd.Decoder):
                         ##[RCN-212 2.3.5]
                         ##[RCN-217 4.3.1]
                         address = packetByte[pos][0] & 0b01111111
-                        self.put_packetbyte(packetByte, pos-1, [Ann.DATA, ['Binary State Control Instruction short form', 'Binarystate short']])
+                        commandText1 = 'Binary State Control Instruction short form'
+                        commandText2 = 'Binarystate short'
+                        self.put_packetbyte(packetByte, pos-1, [Ann.DATA, [commandText1, commandText2]])
                         if address == 0:
                             self.put_packetbyte(packetByte, pos, [Ann.DATA,    [str(packetByte[pos][0] >> 7)]])
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Broadcast F29-F127']])
+                            commandText3 = 'Broadcast F29-F127'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText3]])
                         elif 1 <= address <= 15:
                             ##[RCN-217 4.3.1]
                             if address == 1:
@@ -798,10 +911,12 @@ class Decoder(srd.Decoder):
                                 output_long  += ':on'
                                 output_short += ':on'
                             self.put_packetbyte(packetByte, pos, [Ann.DATA,    [output_long, output_short]])
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['RailCom']])
+                            commandText3 = 'RailCom'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText3]])
                         elif 16 <= address <= 28:
                             self.put_packetbyte(packetByte, pos, [Ann.DATA,    [hex(packetByte[pos][0]) + '/' + str(packetByte[pos][0])]])
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Special uses']])
+                            commandText3 = 'Special uses'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText3]])
                         else:
                             if packetByte[pos-1][0] >> 7 == 0:
                                 output_1 = 'off'
@@ -811,6 +926,8 @@ class Decoder(srd.Decoder):
                             
                     elif subcmd == 0b00000:
                         ##[RCN-212 2.3.6]
+                        commandText1 = 'Binary State Control Instruction long form'
+                        commandText2 = 'Binarystate long'
                         self.put_packetbyte(packetByte, pos-1, [Ann.DATA, ['Binary State Control Instruction long form', 'Binarystate long']])
                         pos, error = self.incPos(pos, packetByte)
                         if error == True: return
@@ -821,7 +938,8 @@ class Decoder(srd.Decoder):
                             output_1 = 'on'
                         if address == 0:
                             self.put_packetbytes(packetByte, pos-1, pos, [Ann.DATA,    [output_1]])
-                            self.put_packetbytes(packetByte, pos-1, pos, [Ann.COMMAND, ['Broadcast F29-F32767']])
+                            commandText3 = 'Broadcast F29-F32767'
+                            self.put_packetbytes(packetByte, pos-1, pos, [Ann.COMMAND, [commandText3]])
                         elif packetByte[pos-1][0] & 0b01111111 == 0:
                             self.put_packetbytes(packetByte, pos-1, pos, [Ann.ERROR,   ['Use binarystate short', 'Error', 'E']])
                         else:
@@ -833,6 +951,7 @@ class Decoder(srd.Decoder):
                             self.put_packetbytes(packetByte, 0, len(packetByte)-2, [Ann.ERROR, ['Only Broadcast allowed', 'Error', 'E']])
                         value = packetByte[pos][0]
                         if (value >> 6) & 0b11 == 0b00:
+                            commandText1 = 'Model-Time'
                             self.put_packetbyte(packetByte, pos-1, [Ann.DATA,  ['Model-Time']])
                             self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['00MMMMMM']])
                             pos, error = self.incPos(pos, packetByte)
@@ -846,6 +965,7 @@ class Decoder(srd.Decoder):
                             output_short = self.weekday_short[packetByte[pos-1][0] >> 5] + ' ' + '{:02.0f}'.format(packetByte[pos-1][0] & 0b00011111) + ':'\
                                            + '{:02.0f}'.format(packetByte[pos-2][0] & 0b00111111) + ', U:' + str(packetByte[pos][0] >> 7) + ', Acc:' + str(packetByte[pos][0] & 0b00111111)
                         elif (value >> 6) & 0b11 == 0b01:
+                            commandText1 = 'Model-Date'
                             self.put_packetbyte(packetByte, pos-1, [Ann.DATA,  ['Model-Date']])
                             self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['010TTTTT']])
                             pos, error = self.incPos(pos, packetByte)
@@ -867,8 +987,10 @@ class Decoder(srd.Decoder):
                         if dec_addr != 0:
                             self.put_packetbytes(packetByte, 0, len(packetByte)-2, [Ann.ERROR, ['Only Broadcast allowed', 'Error', 'E']])
                         if len(packetByte) == 5 or len(packetByte) == 6:
+                            commandText1 = 'Systemtime'
                             self.put_packetbyte(packetByte, pos-1,   [Ann.DATA,    ['Systemtime']])
                         if len(packetByte) == 7 or len(packetByte) == 8:
+                            commandText1 = 'Systemtime (deprecated)'
                             self.put_packetbyte(packetByte, pos-1,   [Ann.DATA,    ['Systemtime (deprecated)']])
                         self.put_packetbyte(packetByte, pos,         [Ann.COMMAND, ['MMMMMMMM']])
                         value = packetByte[pos][0]
@@ -877,7 +999,7 @@ class Decoder(srd.Decoder):
                         self.put_packetbyte(packetByte, pos,         [Ann.COMMAND, ['MMMMMMMM']])
                         value = value * 256 + packetByte[pos][0]
                         if len(packetByte) == 5 or len(packetByte) == 6:
-                            self.put_packetbytes(packetByte, pos-3, pos, [Ann.DATA, [str(value) + ' ms since systemstart (' + '{:.0f}'.format(value/1000) + ' seconds)',\
+                            self.put_packetbytes(packetByte, pos-1, pos, [Ann.DATA, [str(value) + ' ms since systemstart (' + '{:.0f}'.format(value/1000) + ' seconds)',\
                                                                                      str(value) + ' ms since systemstart', str(value)]])
                         if len(packetByte) == 7 or len(packetByte) == 8:
                             pos, error = self.incPos(pos, packetByte)
@@ -891,13 +1013,17 @@ class Decoder(srd.Decoder):
                             self.put_packetbytes(packetByte, pos-3, pos, [Ann.DATA, [str(value) + ' ms since systemstart (' + '{:.0f}'.format(value/60000) + ' minutes = ' + '{:.1f}'.format(value/3600000) + ' hours)',\
                                                                                      str(value) + ' ms since systemstart', str(value)]])
                     else:
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Reserved']])
+                        commandText1 = 'Reserved'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1]])
                 
                 elif cmd == 0b111:  
                     if subcmd & 0b10000 == 0b10000:  #Short Form
                         ##[RCN-214 3]
                         ##[RCN-217 4.3.2]
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND,     ['Configuration Variable Access Instruction - Short Form', 'CV Access Instruction short', 'CV short']])
+                        commandText1 = 'Configuration Variable Access Instruction - Short Form'
+                        commandText2 = 'CV Access Instruction short'
+                        commandText3 = 'CV short'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND,     [commandText1, commandText2, commandText3]])
                         if subcmd & 0b1111 == 0b0000:
                             self.put_packetbyte(packetByte, pos, [Ann.DATA,    ['Not available for use', 'Not av.']])
                         elif subcmd & 0b1111 == 0b0010:
@@ -945,7 +1071,10 @@ class Decoder(srd.Decoder):
                          or (pos == 2 and len(packetByte) == 6):
                         ##[RCN-214 2]
                         ##[RCN-217 5.1]
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Configuration Variable Access Instruction - Long Form (POM)', 'CV Access Instruction long (POM)', 'CV long (POM)']])
+                        commandText1 = 'Configuration Variable Access Instruction - Long Form (POM)'
+                        commandText2 = 'CV Access Instruction long (POM)'
+                        commandText3 = 'CV long (POM)'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
                         if (subcmd >> 2) & 0b11 in [0b01, 0b11, 0b10]:
                             if (subcmd >> 2) & 0b11 == 0b01:
                                 output_long  = 'Read/Verify byte'
@@ -983,7 +1112,10 @@ class Decoder(srd.Decoder):
                                     output_long  = output_long  + ', 0'
                                     output_short = output_short + ',0'
                                 self.put_packetbyte(packetByte, pos, [Ann.DATA,    [output_long, output_short]])
-                                self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Operation, Position, Value', 'Op.,Pos,Value', 'O,P,V']])
+                                commandText4 = 'Operation, Position, Value'
+                                commandText5 = 'Op.,Pos,Value'
+                                commandText6 = 'O,P,V'
+                                self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText4, commandText5, commandText6]])
                         else:
                             output_long  = 'Reserved for future use'
                             output_short = 'Res.'
@@ -993,7 +1125,8 @@ class Decoder(srd.Decoder):
                          or (pos == 2 and len(packetByte) >= 7):
                         ##[RCN-214 4]
                         ##[RCN-217 5.5]
-                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['XPOM']])
+                        commandText1 = 'XPOM'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1]])
                         if (subcmd >> 2) & 0b11 in [0b01, 0b11, 0b10]:
                             if (subcmd >> 2) & 0b11 == 0b01:
                                 output_long  = 'Read bytes'
@@ -1033,24 +1166,28 @@ class Decoder(srd.Decoder):
                                         output_long  += ', 0'
                                         output_short += ',0'
                                     self.put_packetbyte(packetByte, pos, [Ann.DATA,        [output_long, output_short]])
-                                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,     ['Position, Value', 'Pos, Value', 'P,V']])
+                                    commandText4 = 'Position, Value'
+                                    commandText5 = 'Pos, Value'
+                                    commandText6 = 'P,V'
+                                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText4, commandText5, commandText6]])
                                 elif (subcmd >> 2) & 0b11 == 0b11:
-                                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,     ['Data-1']])
+                                    commandText4 = 'Data'
+                                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,     [commandText4 + '-1']])
                                     self.put_packetbyte(packetByte, pos, [Ann.DATA,        [str(packetByte[pos][0])]])
                                     if len(packetByte) > pos+2: #more data + checksum
                                         pos, error = self.incPos(pos, packetByte)
                                         if error == True: return
-                                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Data-2']])
+                                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText4 + '-2']])
                                         self.put_packetbyte(packetByte, pos, [Ann.DATA,    [str(packetByte[pos][0])]])
                                     if len(packetByte) > pos+2: #more data + checksum
                                         pos, error = self.incPos(pos, packetByte)
                                         if error == True: return
-                                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Data-3']])
+                                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText4 + '-3']])
                                         self.put_packetbyte(packetByte, pos, [Ann.DATA,    [str(packetByte[pos][0])]])
                                     if len(packetByte) > pos+2: #more data + checksum
                                         pos, error = self.incPos(pos, packetByte)
                                         if error == True: return
-                                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Data-4']])
+                                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText4 + '-4']])
                                         self.put_packetbyte(packetByte, pos, [Ann.DATA,    [str(packetByte[pos][0])]])
                         else:
                             self.put_packetbyte(packetByte, pos, [Ann.DATA, ['Reserved for future use', 'Res.']])
@@ -1080,7 +1217,6 @@ class Decoder(srd.Decoder):
                 port     =  A3        
                 decaddr  = (A2 << 8) + (A1 << 2) + A3 - 3 
                 acc_addr = decaddr + self.AddrOffset
-                
                 if decaddr < 1:
                     self.put_packetbytes(packetByte, pos-1, pos, [Ann.ERROR, ['Address < 1 not allowed', 'Error', 'E']])
                 
@@ -1088,24 +1224,36 @@ class Decoder(srd.Decoder):
                 if packetByte[pos][0] & 0b10001000 == 0b00001000:
                     ##[RCN-213 2.5]
                     ##[RCN-217 4.3.3]
+                    commandText1 = 'Railcom NOP (AccQuery)'
+                    commandText2 = 'RC NOP'
                     self.put_packetbyte(packetByte, pos,   [Ann.DATA, ['Railcom NOP (AccQuery)', 'RC NOP']])
                     self.put_packetbyte(packetByte, pos-1, [Ann.DATA_ACC, [str(acc_addr)]])
                     if packetByte[pos][0] & 1 == 0:
-                        self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND, ['Basic Accessory Decoder', 'Basic Accessory', 'Basic Acc.']])
+                        commandText4 = 'Basic Accessory Decoder'
+                        commandText5 = 'Basic Accessory'
+                        commandText6 = 'Basic Acc.'
+                        self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND, [commandText4, commandText5, commandText6]])
                     else:
-                        self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND, ['Extended Accessory Decoder', 'Extended Accessory', 'Ext. Acc.']])
+                        commandText4 = 'Extended Accessory Decoder'
+                        commandText5 = 'Ext. Acc.'
+                        self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND, [commandText4, commandText5]])
                 
                 elif packetByte[pos][0] & 0b10000000 == 0b10000000:
                     if     len(packetByte) == 3\
                         or len(packetByte) == 4:
                         ##[RCN-213 2.1]
-                        self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND, ['Basic Accessory Decoder', 'Basic Accessory', 'Basic Acc.']])
+                        commandText1 = 'Basic Accessory Decoder'
+                        commandText2 = 'Basic Accessory'
+                        commandText3 = 'Basic Acc.'
+                        self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
                         if acc_addr+3 == 2047:
                             ##[RCN-213 2.2]
                             if (packetByte[pos][0] >> 3) & 1 == 0 and packetByte[pos][0] & 1 == 0:
                                 self.put_packetbyte(packetByte, pos-1, [Ann.DATA_ACC, ['Broadcast']])
-                                self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND,  ['Broadcast']])
-                                self.put_packetbyte(packetByte, pos,   [Ann.DATA,     ['ESTOP']])
+                                commandText4 = 'Broadcast'
+                                commandText5 = 'ESTOP'
+                                self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND,  [commandText4]])
+                                self.put_packetbyte(packetByte, pos,   [Ann.DATA,     [commandText5]])
                             else:
                                 self.put_packetbyte(packetByte, pos,   [Ann.INFO,    ['Unknown (maybe NMRA-Broadcast)', 'Unknown']])
                         else:
@@ -1125,7 +1273,9 @@ class Decoder(srd.Decoder):
                                 if packetByte[pos][0] == 0: 
                                     self.put_packetbyte(packetByte, pos-1,       [Ann.DATA_ACC, [str(acc_addr) + ' (decoder:' + str(decoder) + ', port:' + str(port) + ')',\
                                                                                                  str(acc_addr) + ' (' + str(decoder) + ',' + str(port) + ')', str(acc_addr)]])
-                                    self.put_packetbyte(packetByte, pos,         [Ann.COMMAND,  ['Decoder reset', 'Reset']])
+                                    commandText4 = 'Decoder reset'
+                                    commandText5 = 'Reset'
+                                    self.put_packetbyte(packetByte, pos,         [Ann.COMMAND,  [commandText4, commandText5]])
                                 else:
                                     self.put_packetbytes(packetByte, pos-1, pos, [Ann.INFO, ['Unknown']])
                             else:        
@@ -1137,7 +1287,10 @@ class Decoder(srd.Decoder):
                         if packetByte[pos][0] >> 4 == 0b1110:
                             ##[RCN-217 6.2]
                             pom = True
-                            self.put_packetbyte(packetByte, pos-2,           [Ann.COMMAND,  ['POM for Basic Accessory Decoder', 'POM Basic Accessory', 'POM Basic Acc.']])
+                            commandText1 = 'POM for Basic Accessory Decoder'
+                            commandText2 = 'POM Basic Accessory'
+                            commandText3 = 'POM Basic Acc.'
+                            self.put_packetbyte(packetByte, pos-2,           [Ann.COMMAND,  [commandText1, commandText2, commandText3]])
                             self.put_packetbyte(packetByte, pos-1,           [Ann.DATA_ACC, [str(acc_addr) + ' (decoder:' + str(decoder) + ', port:' + str(port) + ')',\
                                                                                              str(acc_addr) + ' (' + str(decoder) + ',' + str(port) + ')', str(acc_addr)]])
                             self.put_packetbyte(packetByte, pos-1,           [Ann.COMMAND,  ['Address', 'Addr.']])
@@ -1147,15 +1300,20 @@ class Decoder(srd.Decoder):
                 else:
                     ##[RCN-213 2.3]
                     if len(packetByte) == 4:
-                        self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND, ['Extended Accessory Decoder Control Packet', 'Extended Accessory', 'Ext. Acc.']])
+                        commandText1 = 'Extended Accessory Decoder Control Packet'
+                        commandText2 = 'Extended Accessory'
+                        commandText3 = 'Ext. Acc.'
+                        self.put_packetbyte(packetByte, pos-1, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
                         pos, error = self.incPos(pos, packetByte)
                         if error == True: return
                         if acc_addr+3 == 2047:
                             ##[RCN-213 2.4]
                             if packetByte[pos][0] == 0:
                                 self.put_packetbyte(packetByte, pos-1,       [Ann.DATA_ACC, ['Broadcast']])
-                                self.put_packetbyte(packetByte, pos-1,       [Ann.COMMAND,  ['Broadcast']])
-                                self.put_packetbyte(packetByte, pos,         [Ann.DATA,     ['ESTOP']])
+                                commandText4 = 'Broadcast'
+                                commandText5 = 'ESTOP'
+                                self.put_packetbyte(packetByte, pos-1,       [Ann.COMMAND,  [commandText4]])
+                                self.put_packetbyte(packetByte, pos,         [Ann.DATA,     [commandText5]])
                             else:                                            
                                 self.put_packetbyte(packetByte, pos-1,       [Ann.DATA,  [hex(packetByte[pos-1][0]) + '/' + str(packetByte[pos-1][0])]])
                                 self.put_packetbyte(packetByte, pos,         [Ann.DATA,  [hex(packetByte[pos][0]) + '/' + str(packetByte[pos][0])]])
@@ -1178,7 +1336,10 @@ class Decoder(srd.Decoder):
                         if packetByte[pos][0] >> 4 == 0b1110:
                             ##[RCN-217 6.2]
                             pom = True
-                            self.put_packetbyte(packetByte, pos-2,           [Ann.COMMAND,  ['POM for Extended Accessory Decoder', 'POM Extended Accessory', 'POM Extended Acc.']])
+                            commandText1 = 'POM for Extended Accessory Decoder'
+                            commandText2 = 'POM Extended Accessory'
+                            commandText3 = 'POM Extended Acc.'
+                            self.put_packetbyte(packetByte, pos-2,           [Ann.COMMAND,  [commandText1, commandText2, commandText3]])
                             self.put_packetbyte(packetByte, pos-1,           [Ann.DATA_ACC, [str(acc_addr) + ' (decoder:' + str(decoder) + ', port:' + str(port) + ')',\
                                                                                              str(acc_addr) + ' (' + str(decoder) + ',' + str(port) + ')', str(acc_addr)]])
                             self.put_packetbyte(packetByte, pos-1,           [Ann.COMMAND,  ['Address', 'Addr.']])
@@ -1198,6 +1359,7 @@ class Decoder(srd.Decoder):
                             output_long  = 'Bit manipulation'
                             output_short = 'Bit'
                         self.put_packetbyte(packetByte, pos, [Ann.DATA, [output_long, output_short]])
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Mode']])
                         pos, error = self.incPos(pos, packetByte)
                         if error == True: return
                         cv_addr = (packetByte[pos-1][0] & 0b00000011)*256 + packetByte[pos][0] + 1
@@ -1224,16 +1386,221 @@ class Decoder(srd.Decoder):
                                 output_long  = output_long  + ', 0'
                                 output_short = output_short + ',0'
                             self.put_packetbyte(packetByte, pos, [Ann.DATA,    [output_long, output_short]])
-                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Operation, Position, Value', 'Op.,Pos,Value', 'O,P,V']])
+                            commandText4 = 'Operation, Position, Value'
+                            commandText5 = 'Op.,Pos,Value'
+                            commandText6 = 'O,P,V'
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText4, commandText5, commandText6]])
                     else:
                         output_long  = 'Reserved for future use'
                         output_short = 'Res.'
                         self.put_packetbyte(packetByte, pos, [Ann.DATA, [output_long, output_short]])
                 
-                
-            elif 232 <= idPacket <= 254:
+            elif 232 <= idPacket <= 252:
                 ##[RCN-211 3] Reserved
-                self.put_packetbyte(packetByte, pos, [Ann.COMMAND, ['Reserved']])
+                commandText1 = 'Reserved'
+                self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1]])
+            
+            elif idPacket == 253:
+                ##[s-9.2.1.1]
+                commandText1 = 'Advanced Extended Packet'
+                commandText2 = 'Adv. Ext. Packet'
+                commandText3 = 'Adv. Ext.'
+                self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1, commandText2, commandText3]])
+                if len(packetByte) <= 6:
+                    for i in range (pos, len(packetByte)-1 -1):
+                        pos, error = self.incPos(pos, packetByte)
+                        if error == True: return
+                        output_1  = '?:' + hex(packetByte[pos][0]) + '/' + str(packetByte[pos][0])
+                        self.put_packetbyte(packetByte, pos,         [Ann.DATA,    [output_1]])
+                        commandText4 = 'S-9.1.1 in definition phase'
+                        self.put_packetbytes(packetByte, 1, pos,     [Ann.COMMAND, [commandText4]])
+                else:
+                    for i in range (pos, len(packetByte)-2 -1):
+                        pos, error = self.incPos(pos, packetByte)
+                        if error == True: return
+                        output_1  = '?:' + hex(packetByte[pos][0]) + '/' + str(packetByte[pos][0])
+                        self.put_packetbyte(packetByte, pos,         [Ann.DATA,    [output_1]])
+                    pos, error = self.processCRC(pos, packetByte)
+                    if error == True: return
+                    commandText4 = 'S-9.1.1 in definition phase'
+                    self.put_packetbytes(packetByte, 1, pos-1  ,     [Ann.COMMAND, [commandText4]])
+                
+            elif idPacket == 254:
+                ##[RCN-218]
+                commandText1 = 'DCC-A'
+                self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText1]])
+                pos, error = self.incPos(pos, packetByte)
+                if error == True: return
+                commandByte = packetByte[pos][0]
+                if commandByte == 0b00000000:
+                    commandText2 = 'GET_DATA_START'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
+                elif commandByte == 0b00000001:
+                    commandText2 = 'GET_DATA_CONT'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
+                elif commandByte == 0b00000010:
+                    commandText2 = 'SET_DATA_START'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
+                    self.put_packetbyte(packetByte, pos, [Ann.INFO,    ['currently not defined']])
+                elif commandByte == 0b00000011:
+                    commandText2 = 'SET_DATA_CONT'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
+                    self.put_packetbyte(packetByte, pos, [Ann.INFO,    ['currently not defined']])
+                elif 0b00000100 <= commandByte <= 0b00001111:
+                    commandText2 = 'Reserved'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
+                elif 0b00010000 <= commandByte <= 0b10111111:
+                    commandText2 = 'Reserved'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
+                elif 0b11000000 <= commandByte <= 0b11001111:
+                    commandText2 = 'Reserved'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText2]])
+                elif 0b11010000 <= commandByte <= 0b11011111:
+                    commandText2 = 'Reserved'
+                    self.putx(packetByte[pos][1][0], packetByte[pos][1][4],   [Ann.COMMAND, [commandText2]])
+                    pos, error = self.incPos(pos, packetByte)
+                    if error == True: return
+                    HHHH = (commandByte & 0b00001111 << 8) + packetByte[pos][0]
+                    self.putx(packetByte[pos-1][1][4], packetByte[pos][1][8], [Ann.COMMAND, ['12 bit manufacturer ID', 'manufacturer ID']])
+                    self.putx(packetByte[pos-1][1][4], packetByte[pos][1][8], [Ann.DATA,    [hex(HHHH)]])
+                    UUUU = 0
+                    for i in range (1, 5):
+                        pos, error = self.incPos(pos, packetByte)
+                        if error == True: return
+                        UUUU = (UUUU << 8) + packetByte[pos][0]
+                    self.put_packetbytes(packetByte, pos-3, pos, [Ann.DATA,     [hex(UUUU)]])
+                    self.put_packetbytes(packetByte, pos-3, pos, [Ann.COMMAND,  ['32 bit decoder ID', 'decoder ID']])
+                    pos, error = self.incPos(pos, packetByte)
+                    if error == True: return
+                    commandText4 = 'Subcommand'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  [commandText4]])
+                    BBBB = packetByte[pos][0]
+                    output_short = str(BBBB)
+                    errorPacket = False
+                    if BBBB == 0b11111111:
+                        commandText5 = 'Read ShortInfo'
+                        self.put_packetbyte(packetByte, pos, [Ann.DATA, [commandText5]])
+                    elif BBBB == 0b11111110:
+                        commandText5 = 'Read Block'
+                        self.put_packetbyte(packetByte, pos, [Ann.DATA, [commandText5]])
+                        pos, error = self.incPos(pos, packetByte)
+                        if error == True: return
+                        commandText6 = 'Data space number'
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  [commandText6, 'Data space', 'Space']])
+                        output_short = str(packetByte[pos][0])
+                        self.put_packetbyte(packetByte, pos, [Ann.DATA,     [output_short]])
+                        if len(packetByte) == 15:
+                            pos, error = self.incPos(pos, packetByte)
+                            if error == True: return
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  ['CV31']])
+                            output_short = str(packetByte[pos][0])
+                            self.put_packetbyte(packetByte, pos, [Ann.DATA,     [output_short]])
+                            pos, error = self.incPos(pos, packetByte)
+                            if error == True: return
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  ['CV32']])
+                            output_short = str(packetByte[pos][0])
+                            self.put_packetbyte(packetByte, pos, [Ann.DATA,     [output_short]])
+                            pos, error = self.incPos(pos, packetByte)
+                            if error == True: return
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  ['CV address']])
+                            output_short = str(packetByte[pos][0])
+                            self.put_packetbyte(packetByte, pos, [Ann.DATA,     [output_short]])
+                            pos, error = self.incPos(pos, packetByte)
+                            if error == True: return
+                            self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  ['Number of CVs requested', '#CVs']])
+                            output_short = str(packetByte[pos][0])
+                            self.put_packetbyte(packetByte, pos, [Ann.DATA,     [output_short]])
+                        elif len(packetByte) != 11:
+                            self.put_packetbytes(packetByte, 0, len(packetByte)-1, [Ann.ERROR, ['Unknown Paket, length: ' + str(len(packetByte)), 'Error', 'E']])
+                            errorPacket = True
+                    elif BBBB == 0b11111101:
+                        commandText5 = 'Reserved (Read Background)'
+                        commandText6 = 'Reserved'
+                        self.put_packetbyte(packetByte, pos, [Ann.DATA, [commandText5, commandText6]])
+                    elif BBBB == 0b11111100:
+                        commandText5 = 'Reserved (Write Block)'
+                        commandText6 = 'Reserved'
+                        self.put_packetbyte(packetByte, pos, [Ann.DATA, [commandText5, commandText6]])
+                    elif BBBB == 0b11111011:
+                        commandText5 = 'Set decoder internal state'
+                        commandText6 = 'Set state'
+                        self.put_packetbyte(packetByte, pos, [Ann.DATA, [commandText5, commandText6]])
+                        pos, error = self.incPos(pos, packetByte)
+                        if error == True: return
+                        self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  ['State']])
+                        NNNN = packetByte[pos][0]
+                        if NNNN == 0b11111111:
+                            self.put_packetbyte(packetByte, pos, [Ann.DATA, ['delete changeflags']])
+                        else:
+                            self.put_packetbyte(packetByte, pos, [Ann.DATA, ['Reserved']])
+                    else:
+                        self.put_packetbyte(packetByte, pos, [Ann.DATA, ['Reserved']])
+                    if errorPacket == False:
+                        pos, error = self.processCRC(pos, packetByte)
+                        if error == True: return
+                elif 0b11100000 <= commandByte <= 0b11101111:
+                    commandText2 = 'LOGON_ASSIGN'
+                    self.putx(packetByte[pos][1][0], packetByte[pos][1][4],   [Ann.COMMAND, [commandText2]])
+                    pos, error = self.incPos(pos, packetByte)
+                    if error == True: return
+                    HHHH = (commandByte & 0b00001111 << 8) + packetByte[pos][0]
+                    self.putx(packetByte[pos-1][1][4], packetByte[pos][1][8], [Ann.COMMAND, ['12 bit manufacturer ID', 'manufacturer ID']])
+                    self.putx(packetByte[pos-1][1][4], packetByte[pos][1][8], [Ann.DATA,    [hex(HHHH)]])
+                    UUUU = 0
+                    for i in range (1, 5):
+                        pos, error = self.incPos(pos, packetByte)
+                        if error == True: return
+                        UUUU = (UUUU << 8) + packetByte[pos][0]
+                    self.put_packetbytes(packetByte, pos-3, pos, [Ann.DATA,     [hex(UUUU)]])
+                    self.put_packetbytes(packetByte, pos-3, pos, [Ann.COMMAND,  ['32 bit decoder ID', 'decoder ID']])
+                    pos, error = self.incPos(pos, packetByte)
+                    if error == True: return
+                    pos, error = self.incPos(pos, packetByte)
+                    if error == True: return
+                    if ((packetByte[pos-1][0] & 0b11000000) >> 6) == 0b11:
+                        self.putx(packetByte[pos-1][1][0], packetByte[pos-1][1][2], [Ann.COMMAND,  ['Reserved', 'Res']])
+                        self.putx(packetByte[pos-1][1][2], packetByte[pos][1][8],   [Ann.COMMAND,  ['decoder address']])
+                        output_short = hex(((packetByte[pos-1][0] & 0b00111111) <<8 ) + packetByte[pos][0])
+                        self.putx(packetByte[pos-1][1][2], packetByte[pos][1][8],   [Ann.DATA,     [output_short]])
+                    else:
+                        self.put_packetbytes(packetByte, pos-1, pos,                [Ann.INFO,     ['ignore command']])
+                    output_short = '{0:b}'.format((packetByte[pos-1][0] & 0b11000000) >> 6)
+                    self.putx(packetByte[pos-1][1][0], packetByte[pos-1][1][2],     [Ann.DATA,     [output_short]])
+                    pos, error = self.processCRC(pos, packetByte)
+                    if error == True: return
+                if commandByte == 0b11110000:
+                    commandText4 = 'Reserved'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText4]])
+                elif 0b11110001 <= commandByte <= 0b11111011:
+                    commandText4 = 'Reserved'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND, [commandText4]])
+                elif 0b11111100 <= commandByte <= 0b11111111:
+                    commandText4 = 'LOGON_ENABLE'
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  [commandText4]])
+                    GG = commandByte & 0b00000011
+                    if GG == 0b00:
+                        self.put_packetbyte(packetByte, pos, [Ann.DATA, ['ALL: all decoders resond', 'ALL']])
+                    elif GG == 0b01:
+                        self.put_packetbyte(packetByte, pos, [Ann.DATA, ['LOCO: mobile decoders only', 'LOCO']])
+                    elif GG == 0b10:
+                        self.put_packetbyte(packetByte, pos, [Ann.DATA, ['ACC: accessory decoders only', 'ACC']])
+                    elif GG == 0b11:
+                        self.put_packetbyte(packetByte, pos, [Ann.DATA, ['NOW: all decoders (regardless of backoff)', 'NOW']])
+                    pos, error = self.incPos(pos, packetByte)
+                    if error == True: return
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  ['CID MSB', 'CID']])
+                    output_short = hex(packetByte[pos][0])
+                    self.put_packetbyte(packetByte, pos, [Ann.DATA,     [output_short]])
+                    pos, error = self.incPos(pos, packetByte)
+                    if error == True: return
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  ['CID LSB', 'CID']])
+                    output_short = hex(packetByte[pos][0])
+                    self.put_packetbyte(packetByte, pos, [Ann.DATA,     [output_short]])
+                    pos, error = self.incPos(pos, packetByte)
+                    if error == True: return
+                    self.put_packetbyte(packetByte, pos, [Ann.COMMAND,  ['SessionID']])
+                    output_short = str(packetByte[pos][0])
+                    self.put_packetbyte(packetByte, pos, [Ann.DATA,     [output_short]])
             
             elif idPacket == 255:
                 ##[RCN-211 3] Idle
@@ -1241,23 +1608,24 @@ class Decoder(srd.Decoder):
                 if error == True: return
                 if packetByte[pos][0] == 0:
                       ##[RCN-211 4.2] Idle
-                    self.put_packetbytes(packetByte, pos-1, pos, [Ann.COMMAND, ['Idle']])
+                    commandText1 = 'Idle'
+                    self.put_packetbytes(packetByte, pos-1, pos, [Ann.COMMAND, [commandText1]])
                 else: ##[RCN-211 4.3] System command
                     validPacketFound = True
-                    self.put_packetbytes(packetByte, pos-1, pos-1, [Ann.COMMAND, ['RailComPlus®']])
+                    commandText1 = 'RailComPlus®'
+                    self.put_packetbytes(packetByte, pos-1, pos-1, [Ann.COMMAND, [commandText1]])
                     if len(packetByte) >= 5 and packetByte[pos+1][0] == 62 and packetByte[pos+2][0] == 7 and packetByte[pos+3][0] == 64:
-                        self.put_packetbytes(packetByte, pos, len(packetByte)-2, [Ann.COMMAND, ['System command (not documented) (IDNotify?)', 'System command']])
+                        commandText4 = 'System command (not documented) (IDNotify?)'
+                        commandText5 = 'System command'
+                        self.put_packetbytes(packetByte, pos, len(packetByte)-2, [Ann.COMMAND, [commandText4, commandText5]])
                     else:
-                        self.put_packetbytes(packetByte, pos, len(packetByte)-2, [Ann.COMMAND, ['System command (not documented)', 'System command']])
-                    pos = -1
+                        commandText4 = 'System command (not documented)'
+                        commandText5 = 'System command'
+                        self.put_packetbytes(packetByte, pos, len(packetByte)-2, [Ann.COMMAND, [commandText4, commandText5]])
+                    pos -= 1 ##
 
         ## remaining bytes in packet
-        if pos == -1:  #Railcomplus
-            pos = 0
-        elif pos == 0: #nothing valid found
-            pos -= 1
-            
-        for x in range(pos+1, len(packetByte)-1):
+        for x in range(pos+1, len(packetByte) -1):
             output_1  = '?:' + hex(packetByte[x][0]) + '/' + str(packetByte[x][0])
             self.put_packetbyte(packetByte, x,         [Ann.DATA, [output_1]])
             if validPacketFound == False:
@@ -1275,21 +1643,21 @@ class Decoder(srd.Decoder):
         if pos+1 < len(packetByte):
             output_1 = ''
             checksum = packetByte[0][0]
-            for x in range(1, len(packetByte)-1):
+            for x in range(1, len(packetByte) -1):
                 checksum = checksum ^ packetByte[x][0]
             if checksum == packetByte[len(packetByte)-1][0]:
                 output_1 = 'OK'
                 self.put_packetbyte(packetByte, len(packetByte)-1,     [Ann.FRAME, ['Checksum: ' + output_1, output_1]])
             else:
-                output_1 = str(checksum) + '<>' + str(packetByte[len(packetByte)-1][0])
+                output_1 = hex(checksum) + '<>' + hex(packetByte[len(packetByte)-1][0])
                 self.put_packetbytes(packetByte, 0, len(packetByte)-1, [Ann.ERROR, ['Checksum', 'Error', 'E']])
                 self.put_packetbyte(packetByte, len(packetByte)-1,     [Ann.FRAME_OTHER, ['Checksum: ' + output_1, output_1]])
         else:
             self.put_packetbytes(packetByte, 0, len(packetByte)-1,     [Ann.ERROR, ['Checksum missing', 'Error', 'E']])
 
         
-        ##################
-        ## Search function
+        ###################
+        ## Search functions
         ## byte
         byte_found = False
         for x in range(0, len(packetByte)):
@@ -1306,7 +1674,7 @@ class Decoder(srd.Decoder):
             and (   self.byte_search < 0
                  or byte_found       == True)
             ):
-            self.put_packetbyte(packetByte, 0, [Ann.SEARCH_DEC, ['DECODER:' + str(self.dec_addr_search)]])
+            self.put_packetbytes(packetByte, 0, len(packetByte)-2, [Ann.SEARCH_DEC, ['DECODER:' + str(self.dec_addr_search)]])
         ## acc_addr
         if  (   self.acc_addr_search == acc_addr
             and (   self.byte_search < 0
@@ -1318,7 +1686,17 @@ class Decoder(srd.Decoder):
             and (   self.byte_search < 0
                  or byte_found       == True)
             ):
-            self.put_packetbyte(packetByte, 1, [Ann.SEARCH_CV, ['CV:' + str(self.cv_addr_search)]])
+            self.put_packetbytes(packetByte, 0, len(packetByte)-2, [Ann.SEARCH_CV, ['CV:' + str(self.cv_addr_search)]])
+        ## command
+        if  (self.command_search != '' 
+            and (   (self.command_search.lower() in commandText1.lower())
+                 or (self.command_search.lower() in commandText2.lower())
+                 or (self.command_search.lower() in commandText3.lower())
+                 or (self.command_search.lower() in commandText4.lower())
+                 or (self.command_search.lower() in commandText5.lower())
+                 or (self.command_search.lower() in commandText6.lower())
+            )):
+            self.put_packetbytes(packetByte, 0, len(packetByte)-2, [Ann.SEARCH_COMMAND, ['COMMAND:' + (str(self.command_search))]])
 
         
     def setNextStatus(self, newstatus):
@@ -1604,6 +1982,7 @@ class Decoder(srd.Decoder):
             output_1 += '{:.0f}'.format(self.accuracy) + ' µs'
         else:
             output_1 += '{:.0f}'.format(self.accuracy*1000) + ' ns'
+        output_1 += ", DCC decoder version:" + self.version
         self.putx(0, self.edge_1, [Ann.BITS_OTHER, [output_1]])
 
         while True:
@@ -1705,8 +2084,6 @@ class Decoder(srd.Decoder):
                             else:
                                 self.putx(self.edge_1, self.edge_3, [Ann.BITS_OTHER,  ['0']])
                                 self.putx(self.edge_1, self.edge_3, [Ann.FRAME_OTHER, ['Synchronize (wait for preamble) (too few half 1 bits (' + '{:.0f}'.format(self.half1Counter) + '/min' + '{:.0f}'.format(self.minCountPreambleBits*2) + '))', 'Synchronize', 'Sync.', 'S']])
-
-
                             self.half1Counter = 0
                             self.wait({0: 'e'})
                             self.edge_1 = self.edge_3

@@ -12,3 +12,4 @@ TAMS_50kHz_RailcomCutout.sr				: among others test railcom cutout ia tams EasyCo
 TAMS_50kHz_XPA2_3_4.sr					: among others test XPA command (POM basic accessory CV3) via tams EasyControl (50kHz samplerate)
 Testdata_50kHz.sr						: Manually generated signal sequence for testing various telegrams (50kHz samplerate)
 Testdata.2_50kHz.sr						: Manually generated signal sequence for testing various telegrams (100kHz samplerate)
+Test_50kHz_RCN218.sr					: Manually generated signal sequence for testing RCN-218 telegrams (50kHz samplerate)
