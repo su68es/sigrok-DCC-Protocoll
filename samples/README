@@ -11,3 +11,4 @@ TAMS_50kHz_POM_CV1_1.sr					: among others POM write CV1 via tams EasyControl (5
 TAMS_50kHz_RailcomCutout.sr				: among others test railcom cutout ia tams EasyControl (50kHz samplerate)
 TAMS_50kHz_XPA2_3_4.sr					: among others test XPA command (POM basic accessory CV3) via tams EasyControl (50kHz samplerate)
 Testdata_50kHz.sr						: Manually generated signal sequence for testing various telegrams (50kHz samplerate)
+Testdata.2_50kHz.sr						: Manually generated signal sequence for testing various telegrams (100kHz samplerate)
